@@ -19,6 +19,7 @@
   "Assets/Scripts/NoEngine/Pure.cs",
   "Assets/Scripts/Player/PlayerController.cs",
   "Assets/Scripts/Player/PlayerHealth.cs",
+  "Assets/Scripts/System/FlowDemo.cs",
   "Assets/Scripts/System/GameManager.cs",
   "Assets/Scripts/System/MissingUsing.cs",
   "Assets/Scripts/System/SemanticDemo.cs",

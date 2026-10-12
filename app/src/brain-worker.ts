@@ -101,6 +101,8 @@ const handlers: Record<string, (p: any) => any> = {
   rename: (p) => engine!.rename(p.path, p.line, p.col, p.newName ?? ""),
   // Phase 8 — usages panel (all project references + origin of a symbol)
   findUses: (p) => engine!.findUses(p.path, p.line, p.col),
+  // Phase 9 — per-script call-flow graph (methods + external terminals)
+  callFlow: (p) => engine!.callFlow(p.path),
   missingTrees: () => engine!.missingTrees(),
   removeFile: (p) => { engine!.removeFile(p.path); return { ok: true }; },
   // v0.7.0 — explorer file-operations sync (drop entries missing from a fresh scan)

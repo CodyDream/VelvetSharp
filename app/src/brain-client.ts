@@ -106,6 +106,10 @@ export class BrainClient {
   findUses(path: string, line: number, col: number) {
     return this.call<SymbolUsesResult>("findUses", { path, line, col });
   }
+  /** Phase 9 — per-script call-flow graph (methods + external terminals) */
+  callFlow(path: string) {
+    return this.call<CallFlowResult>("callFlow", { path });
+  }
   /** files indexed from the startup cache without a parse tree — parse these
    *  before renaming so references inside them are not missed */
   missingTrees() { return this.call<string[]>("missingTrees"); }
@@ -118,9 +122,9 @@ export class BrainClient {
 export interface DepNodeResult {
   id: string; name: string; kind: string; file: string; line: number;
   ns: string; asm: string | null; isMono: boolean; external: boolean;
-  outOfScope?: boolean; refCount: number; outDeg: number; inDeg: number;
+  outOfScope?: boolean; singleton?: boolean; refCount: number; outDeg: number; inDeg: number;
 }
-export interface DepEdgeResult { from: string; to: string; kind: "extends" | "implements" | "uses"; weight: number }
+export interface DepEdgeResult { from: string; to: string; kind: "extends" | "implements" | "uses" | "self"; weight: number }
 export interface DepGraphResult {
   scope: string;
   nodes: DepNodeResult[];
@@ -168,6 +172,29 @@ export interface SymbolUsesResult {
   origin?: string;
   uses: UseHitDto[];
   warnings: string[];
+}
+
+/** Phase 9 — call-flow payload (per-script method graph) */
+export interface FlowNodeDto {
+  id: string;
+  label: string;
+  kind: "method" | "external";
+  container: string;
+  line: number;
+  ret: string;
+  entry: boolean;
+  unityMsg: boolean;
+}
+export interface FlowEdgeDto { from: string; to: string; count: number; external: boolean }
+export interface CallFlowResult {
+  ok: boolean;
+  reason?: string;
+  file: string;
+  nodes: FlowNodeDto[];
+  edges: FlowEdgeDto[];
+  truncated: boolean;
+  methodCount: number;
+  extCount: number;
 }
 
 export interface SemRange { line: number; col: number; endLine: number; endCol: number }

@@ -72,6 +72,9 @@ interface VSState {
   graphOpen: boolean;
   graphScope: string | null;          // null = whole project
   graphSeed: number;                  // bump to force a re-request of the same scope
+  // Phase 9 — call-flow mode: "types" graph or per-script "flow" graph
+  graphMode: "types" | "flow";
+  graphFlowFile: string | null;       // the script the flow view renders
   renameWidget: null | { path: string; line: number; col: number; oldName: string; kind: string };
   ctxMenu: null | { x: number; y: number; path: string; dir: boolean };
 
@@ -130,6 +133,7 @@ interface VSState {
   openGraph: (scope: string | null) => void;
   closeGraph: () => void;
   setGraphScope: (scope: string | null) => void;
+  setGraphMode: (m: "types" | "flow") => void;
   refreshGraph: () => void;
   setRenameWidget: (r: VSState["renameWidget"]) => void;
   setCtxMenu: (c: VSState["ctxMenu"]) => void;
@@ -186,6 +190,8 @@ export const useStore = create<VSState>((set) => ({
   graphOpen: false,
   graphScope: null,
   graphSeed: 0,
+  graphMode: "types",
+  graphFlowFile: null,
   renameWidget: null,
   ctxMenu: null,
   themePicker: null,
@@ -233,9 +239,18 @@ export const useStore = create<VSState>((set) => ({
   toggleProblems: () => set((s) => ({ problemsOpen: !s.problemsOpen })),
   setOutline: (outline) => set({ outline }),
   setPathPrompt: (pathPrompt) => set({ pathPrompt }),
-  openGraph: (scope) => set({ graphOpen: true, graphScope: scope, active: "__graph__", graphSeed: Date.now() }),
+  // opening the graph remembers the script that was active so Call Flow can
+  // render it (active becomes "__graph__" while the pseudo-tab is open)
+  openGraph: (scope) => set((s) => ({
+    graphOpen: true,
+    graphScope: scope,
+    active: "__graph__",
+    graphSeed: Date.now(),
+    graphFlowFile: s.active && s.active !== "__graph__" && s.active.endsWith(".cs") ? s.active : s.graphFlowFile,
+  })),
   closeGraph: () => set({ graphOpen: false }),
   setGraphScope: (graphScope) => set({ graphScope, graphSeed: Date.now() }),
+  setGraphMode: (graphMode) => set({ graphMode, graphSeed: Date.now() }),
   refreshGraph: () => set({ graphSeed: Date.now() }),
   setRenameWidget: (renameWidget) => set({ renameWidget }),
   setCtxMenu: (ctxMenu) => set({ ctxMenu }),

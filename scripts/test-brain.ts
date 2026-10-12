@@ -167,6 +167,7 @@ async function main() {
   const dup13 = all13.find((d: any) => /already defined/.test(d.message) && /Add/.test(d.message));
   const iface13 = sem13.diagnostics.find((d: any) => /should start with 'I'/.test(d.message));
   const ambig13 = sem13.diagnostics.find((d: any) => /Ambiguous reference: 'Object'/.test(d.message));
+  const ambigAny13 = sem13.diagnostics.filter((d: any) => /Ambiguous reference/.test(d.message));
   const voidRet13 = sem13.diagnostics.find((d: any) => /void method 'Bad'/.test(d.message));
   const paths13 = sem13.diagnostics.find((d: any) => /not all code paths return a value/.test(d.message) && /Pick/.test(d.message));
   const nullVal13 = sem13.diagnostics.find((d: any) => /Cannot convert null/.test(d.message));
@@ -176,7 +177,10 @@ async function main() {
   console.log("TEST13 voidRet:", voidRet13?.message?.slice(0, 60));
   check("TEST13 overload-friendly duplicate detection fires on same-sig Add", !!dup13);
   check("TEST13 interface naming warning (Repo → I)", !!iface13);
-  check("TEST13 ambiguous symbol warning (Object)", !!ambig13);
+  // Phase 9 (user: "ignore warning also"): ambiguous-reference (CS0104) warnings
+  // are SUPPRESSED — the lint cannot model exact using-directive semantics and
+  // produced false positives ('Task' vs 'Task`1'). Expect ZERO, not one.
+  check("TEST13 ambiguous warnings suppressed (Phase 9 — was: fires on Object)", ambigAny13.length === 0);
   check("TEST13 void method returning value flagged", !!voidRet13);
   check("TEST13 Pick(bool) all-paths-return is clean", !paths13);
   check("TEST13 return null on reference type is clean", !nullVal13);
@@ -965,11 +969,124 @@ async function main() {
     check8("TEST51b genuinely wrong out 42 / out F() still flagged; legal out v untouched", kept.length === 2);
   }
 
-  // ---- Phase 8 summary ----
+  // ==================== Phase 9 ====================
+  const results9: [string, boolean][] = [];
+  const check9 = (name: string, ok: boolean) => {
+    results9.push([name, ok]);
+    console.log(`  ${ok ? "PASS" : "FAIL"} — ${name}`);
+  };
+
+  // ---- TEST52: member-of-known-type is NEVER a missing type (Array.Empty<int>()) ----
+  // User report: `new JArray(currentWeaponLoadout ?? Array.Empty<int>())` produced
+  // "The type or namespace name 'Empty' could not be found" — a false positive
+  // (VS/Rider clean): 'Empty' is System.Array's static generic METHOD, and the
+  // generic_name sits under a member_access, not directly in a type position.
+  {
+    engine.updateFile("__test__/EmptyType.cs", "namespace Deep.ThirdParty { public class Empty { } }", true);
+    engine.updateFile("__test__/LoadoutRegression.cs",
+      "using UnityEngine;\n" +
+      "using System.Threading.Tasks;\n\n" +
+      "public class LoadoutRegression : MonoBehaviour\n" +
+      "{\n" +
+      "    private int[] currentWeaponLoadout;\n" +
+      "    private Task pendingWork;\n\n" +
+      "    private void Start()\n" +
+      "    {\n" +
+      "        var data = new JObject { { \"weapons\", new JArray(currentWeaponLoadout ?? Array.Empty<int>()) } };\n" +
+      "        pendingWork = Task.Delay(10);\n" +
+      "        Debug.Log(data);\n" +
+      "    }\n" +
+      "}\n", true);
+    const r52 = engine.updateFile("__test__/LoadoutRegression.cs", engine.fileContent("__test__/LoadoutRegression.cs") ?? "", true);
+    const diags52 = (r52.diagnostics ?? []).concat(r52.sem?.diagnostics ?? []);
+    const emptyErr = diags52.filter((d: any) => /'Empty' could not be found/.test(d.message));
+    const ambig52 = diags52.filter((d: any) => /Ambiguous reference/.test(d.message));
+    check9("TEST52a Array.Empty<int>() member call → ZERO 'Empty could not be found' errors",
+      emptyErr.length === 0);
+    check9("TEST52b bare Task (arity-0) → ZERO ambiguous-reference warnings (suppressed, Phase 9)",
+      ambig52.length === 0);
+
+    // control: a type that EXISTS in the project but is not reachable via usings
+    // must still be flagged (the lint is alive — only member-of-known-type and
+    // fully-unknown names are silent by design; JObject/JArray prove the latter)
+    engine.updateFile("__test__/Reachable.cs", "namespace Far.Away { public class Distant { } }", true);
+    engine.updateFile("__test__/MissingType.cs",
+      "public class MissingType\n" +
+      "{\n" +
+      "    private Distant field;\n" +
+      "}\n", true);
+    const r52c = engine.updateFile("__test__/MissingType.cs", engine.fileContent("__test__/MissingType.cs") ?? "", true);
+    const diags52c = (r52c.diagnostics ?? []).concat(r52c.sem?.diagnostics ?? []);
+    check9("TEST52c unreachable-but-existing type in declaration position still flagged (lint alive)",
+      diags52c.some((d: any) => /'Distant' could not be found/.test(d.message)));
+  }
+
+  // ---- TEST53: dependency graph marks static singletons (self-link) ----
+  // User: "show static instances too, specially ones that link something to it self"
+  {
+    engine.updateFile("__test__/SingletonProbe.cs",
+      "using UnityEngine;\n\n" +
+      "public class SingletonProbe : MonoBehaviour\n" +
+      "{\n" +
+      "    public static SingletonProbe Instance;\n" +
+      "    public static GameManagerProbe GM;\n" +
+      "    private int plainField;\n" +
+      "}\n\n" +
+      "public class GameManagerProbe : MonoBehaviour\n" +
+      "{\n" +
+      "    public static GameManagerProbe Instance { get; private set; }\n" +
+      "}\n", true);
+    const g53 = engine.dependencyGraph(null, false);
+    const sp = g53.nodes.find((n: any) => n.name === "SingletonProbe");
+    const gm = g53.nodes.find((n: any) => n.name === "GameManagerProbe");
+    const self53 = g53.edges.filter((e: any) => e.kind === "self");
+    check9("TEST53a class with `static OwnType Instance` field → node.singleton + self edge",
+      sp?.singleton === true && self53.some((e: any) => e.from === sp.id && e.to === sp.id));
+    check9("TEST53b static self-type property also detected (GameManagerProbe)",
+      gm?.singleton === true && self53.some((e: any) => e.from === gm.id && e.to === gm.id));
+    check9("TEST53c graph keeps types-only node kinds (no member dump regression)",
+      g53.nodes.every((n: any) => ["class", "struct", "interface", "enum", "external"].includes(n.kind)));
+  }
+
+  // ---- TEST54: per-script call-flow graph (demo FlowDemo.cs) ----
+  // In-file calls resolve; external calls become TERMINAL nodes of their own kind.
+  // NB: loadFiles indexes without parse trees (they build on open) — force a deep
+  // parse first, exactly like opening the script in the editor would.
+  {
+    const flowPath = "Assets/Scripts/System/FlowDemo.cs";
+    // earlier suites call syncFiles() which drops demo fixtures from the index —
+    // reload the demo script straight from disk, then deep-parse (editor-open equivalent)
+    const flowSrc = fs.readFileSync(path.join(DEMO, "Assets/Scripts/System/FlowDemo.cs"), "utf8");
+    engine.updateFile(flowPath, flowSrc, true);
+    const flow = engine.callFlow(flowPath);
+    const nodeOf = (label: string) => flow.nodes.find((n: any) => n.label === label);
+    const edgeOf = (from: string, to: string, ext?: boolean) =>
+      flow.edges.find((e: any) => e.from === from && e.to === to && (ext === undefined || e.external === ext));
+    const bid = (label: string) => nodeOf(label)?.id ?? "?";
+    check9("TEST54a flow ok with method nodes (BuildPayload/ApplyLoadout/LogPayload/Refresh…)",
+      flow.ok === true && !!nodeOf("BuildPayload") && !!nodeOf("ApplyLoadout") && !!nodeOf("LogPayload"));
+    check9("TEST54b Start/Update/Awake flagged as Unity lifecycle methods",
+      nodeOf("Start")?.unityMsg === true && nodeOf("Awake")?.unityMsg === true);
+    check9("TEST54c in-file call BuildPayload → LogPayload",
+      !!edgeOf(bid("BuildPayload"), bid("LogPayload"), false));
+    check9("TEST54d in-file call ApplyLoadout → BuildPayload",
+      !!edgeOf(bid("ApplyLoadout"), bid("BuildPayload"), false));
+    check9("TEST54e external Debug.Log → terminal node with NO outgoing edges",
+      !!edgeOf(bid("LogPayload"), "ext::debug.log", true) &&
+      flow.edges.every((e: any) => e.from !== "ext::debug.log"));
+    check9("TEST54f external Task.Delay terminal", !!edgeOf(bid("Start"), "ext::task.delay", true));
+    check9("TEST54g Awake/Start are entries (nothing calls them in-file), BuildPayload is not",
+      nodeOf("Awake")?.entry === true && nodeOf("Start")?.entry === true && nodeOf("BuildPayload")?.entry === false);
+  }
+
+  // ---- Phase 9 summary ----
   const failed8 = results8.filter(([, ok]) => !ok);
   console.log(`\n=========== Phase 8 RESULT: ${results8.length - failed8.length}/${results8.length} PASS ===========`);
   for (const [name] of failed8) console.log("  FAILED:", name);
-  if (failed8.length) process.exitCode = 2;
+  const failed9 = results9.filter(([, ok]) => !ok);
+  console.log(`\n=========== Phase 9 RESULT: ${results9.length - failed9.length}/${results9.length} PASS ===========`);
+  for (const [name] of failed9) console.log("  FAILED:", name);
+  if (failed8.length || failed9.length) process.exitCode = 2;
 }
 
 main().then(() => process.exit(process.exitCode ?? 0)).catch((e) => { console.error("FATAL", e); process.exit(1); });

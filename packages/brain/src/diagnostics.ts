@@ -540,6 +540,10 @@ function isTypePosition(id: SyntaxNode): boolean {
   // (`GetComponent<T>()` — T's parent generic_name is the invoked method)
   if (p.type === "generic_name" && p.parent?.type === "invocation_expression"
     && p.parent.childForFieldName("function")?.id === p.id) return false;
+  // …and generic_name as the NAME of a member access is a METHOD, not a type:
+  // `Array.Empty<int>()` — 'Empty' is System.Array's static generic method.
+  // (Phase 9: user's false positive — VS/Rider clean, we flagged 'Empty' as CS0246)
+  if (p.type === "generic_name" && p.parent?.type === "member_access_expression") return false;
   if (TYPE_POSITION_PARENTS.has(p.type)) return true;
   // field-aware nodes: only the TYPE/RETURNS child is a type position —
   // `parameter` also holds the parameter NAME (never a type), and
@@ -630,14 +634,14 @@ function checkTypeUsings(ctx: Ctx, root: SyntaxNode): void {
         );
       }
     } else if (visibleHits.length > 1 && new Set(visibleHits.map((c) => c.full.toLowerCase())).size > 1) {
-      // two DIFFERENT types with the same simple name are visible → CS0104
-      if (reported.has(key)) continue;
-      reported.add(key);
-      const a = visibleHits[0], b = visibleHits[1];
-      warn(ctx, id,
-        `Ambiguous reference: '${name}' matches '${a.full}' and '${b.full}' (qualify or remove a using directive)`,
-        name.length,
-      );
+      // CS0104 (ambiguous reference) intentionally NOT reported — Phase 9 user request
+      // ("ignore warning also"). Bare-name ambiguity depends on exact using-directive
+      // semantics and generic arity (e.g. `Task` binds arity-0 Task, NOT Task<T>), which
+      // our symbol index cannot fully model — flagging it produced false positives
+      // ('Task' vs 'Task`1', cross-namespace same-name types). Silence > invented warnings.
+      //
+      // NOTE: bare identifiers only ever bind arity-0 types anyway; generic candidates
+      // (name`1) are filtered by the engine when resolving — see typeCandidates users.
     }
   }
 }

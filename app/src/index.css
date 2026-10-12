@@ -749,3 +749,82 @@ button.asm-chip { font: inherit; }
 
 /* version chip (Phase 7+) — always-visible build identity in the status bar */
 .version-chip { font-weight: 700; letter-spacing: .3px; }
+
+/* ---- Phase 9: right-click context menu (problems bar "copy this problem") ---- */
+.ctx-menu {
+  position: fixed;
+  z-index: 9999;
+  min-width: 210px;
+  background: var(--panel, #1a1b26);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+}
+.ctx-item {
+  all: unset;
+  display: block;
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--fg, #cfcfff);
+  border-radius: 5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ctx-item:hover { background: var(--hover, rgba(255, 255, 255, 0.08)); }
+.ctx-sep { height: 1px; background: var(--border); margin: 3px 6px; }
+
+/* ---- Phase 9: dependency-graph singleton self-loops + badge ---- */
+.dg-edge.e-self {
+  stroke: #e5a158;
+  stroke-dasharray: 5 3;
+  fill: none;
+}
+.dg-node.singl .dg-box { stroke: #e5a158; }
+.dg-singleton circle { fill: #e5a158; }
+.dg-singleton text {
+  fill: #1a1b26;
+  font-size: 9px;
+  font-weight: 700;
+  text-anchor: middle;
+  pointer-events: none;
+}
+.lg-self { color: #e5a158; }
+
+/* ---- Phase 9: call-flow view (per-script method graph) ---- */
+.dg-node.method .dg-box { stroke: #4ec9b0; }
+.dg-node.method.entry .dg-box { stroke-width: 2; }
+.dg-node.extcall .dg-box {
+  stroke: #8a7fae;
+  stroke-dasharray: 4 3;
+  fill: rgba(138, 127, 174, 0.08);
+}
+.dg-node.extcall .dg-glyph { fill: #8a7fae; }
+.dg-node.extcall .dg-name { fill: #a99fc9; font-style: italic; }
+.dg-edge.e-call { stroke: #4ec9b0; fill: none; }
+.dg-edge.e-extcall { stroke: #8a7fae; stroke-dasharray: 5 3; fill: none; }
+.dg-unitymsg circle { fill: #ffd76e; }
+.dg-unitymsg text {
+  fill: #1a1b26;
+  font-size: 9px;
+  font-weight: 700;
+  text-anchor: middle;
+  pointer-events: none;
+}
+.lg-call { color: #4ec9b0; }
+.lg-extcall { color: #a99fc9; }
+.dg-flowfile {
+  font-size: 11px;
+  color: var(--fg, #cfcfff);
+  background: var(--hover, rgba(255, 255, 255, 0.06));
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 9px;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dg-modes { display: flex; gap: 4px; }

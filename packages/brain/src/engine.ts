@@ -16,6 +16,7 @@ import {
 import { semanticAnalysis } from "./diagnostics";
 import { buildDependencyGraph } from "./deps";
 import { symbolAt, computeRename, findSymbolUses, type SymbolUsesResult } from "./rename";
+import { buildCallFlow, type CallFlowResult } from "./callflow";
 import type {
   AnalysisResult, CompletionItem, Diagnostic, FileSymbols, HoverResult,
   SearchHit, SignatureInfo, DefinitionResult, SymbolInfo, OutlineEntry,
@@ -1357,6 +1358,13 @@ export class VelvetSharpEngine {
    *  (the usages panel). Same machinery as F2 rename, read-only. */
   findUses(path: string, line: number, col: number): SymbolUsesResult {
     return findSymbolUses(this, path, line, col);
+  }
+
+  /** Phase 9 — per-script call-flow graph: in-file method nodes + in-file call
+   *  edges; anything unresolved becomes an external TERMINAL node (different
+   *  shape in the UI, branch ends there). */
+  callFlow(path: string): CallFlowResult {
+    return buildCallFlow(this, path);
   }
 
   /** files indexed from the startup cache that have no parse tree yet —

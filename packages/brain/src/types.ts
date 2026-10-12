@@ -170,7 +170,7 @@ export interface WorkspaceAdapter {
 
 /* ------------------- v0.6.0 — dependency graph ------------------- */
 
-export type DepKind = "extends" | "implements" | "uses";
+export type DepKind = "extends" | "implements" | "uses" | "self";
 
 export interface DepNode {
   id: string;              // unique: project fqn ("p::fqn") or "ext::<full>" for externals
@@ -184,6 +184,10 @@ export interface DepNode {
   external: boolean;       // Unity/BCL type (not in the project)
   /** project type declared OUTSIDE the selected folder scope (drawn dimmed) */
   outOfScope?: boolean;
+  /** Phase 9: singleton pattern — declares `static <OwnType> <field/prop>`
+   *  ("static instances … ones that link something to itself"). Drawn with a
+   *  badge + a self-loop edge. */
+  singleton?: boolean;
   refCount: number;        // aggregated reference weight
   outDeg: number;
   inDeg: number;

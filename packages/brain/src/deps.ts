@@ -105,7 +105,8 @@ export function buildDependencyGraph(
   const edgeIndex = new Map<string, RawEdge>();
 
   const addEdge = (fromId: string, toId: string, kind: DepKind, weight = 1) => {
-    if (!fromId || !toId || fromId === toId) return;
+    if (!fromId || !toId) return;
+    if (fromId === toId && kind !== "self") return; // self-loops only for the explicit singleton edge (Phase 9)
     const key = `${fromId}|${toId}|${kind}`;
     const existing = edgeIndex.get(key);
     if (existing) existing.weight = Math.min(99, existing.weight + weight);
@@ -240,6 +241,19 @@ export function buildDependencyGraph(
       const ownerType = resolveProjectType(ownerSimple, f);
       if (!ownerType || ownerType.file !== f.path) continue; // only inside scope files
       const fromId = ensureProjectNode(ownerType, false);
+      // Phase 9 singleton detection (user: "show static instances too, specially
+      // ones that link something to itself"): `static <OwnType> Instance` field
+      // or property — the classic Unity/global singleton access point. Mark the
+      // node and add an explicit self-loop edge (self references were previously
+      // dropped by the spam guard).
+      if (m.static && (m.kind === "field" || m.kind === "property") && m.returnType) {
+        const retSimple = simpleNameOf(m.returnType);
+        if (retSimple === ownerType.name) {
+          const n = nodesById.get(fromId);
+          if (n) n.singleton = true;
+          addEdge(fromId, fromId, "self", 1);
+        }
+      }
       const siteTypes: string[] = [];
       if (m.returnType) siteTypes.push(m.returnType);
       for (const p of m.params ?? []) if (p.type) siteTypes.push(p.type);

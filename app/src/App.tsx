@@ -1429,8 +1429,25 @@ function ProblemsBar() {
   const toggle = useStore((s) => s.toggleProblems);
   const active = useStore((s) => s.active);
   const [sel, setSel] = useState<Set<number>>(new Set());
+  const [menu, setMenu] = useState<{ x: number; y: number; index: number } | null>(null);
   const boxRef = useRef<HTMLDivElement>(null);
   useEffect(() => { setSel(new Set()); }, [problems.length]);
+
+  // right-click menu closes on any click elsewhere / Esc / resize (Phase 9:
+  // "copy only 1 problem at a time from problem bar right click option")
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") setMenu(null); };
+    window.addEventListener("click", close);
+    window.addEventListener("resize", close);
+    window.addEventListener("keydown", esc);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("keydown", esc);
+    };
+  }, [menu]);
 
   const errors = problems.filter((p) => p.severity === "error").length;
   const warnings = problems.length - errors;
@@ -1498,7 +1515,7 @@ function ProblemsBar() {
         <span className={"pb-count" + (warnings ? " has-warnings" : "")}>⚠ {warnings} warning{warnings === 1 ? "" : "s"}</span>
         <span className="pb-hint">
           {open
-            ? "jump: click a row · multi-select: Ctrl+click · copy: Ctrl+C (all: Ctrl+A first)"
+            ? "jump: click a row · copy 1: right-click it · copy many: Ctrl+click then Ctrl+C (all: Ctrl+A first)"
             : "click to expand — every script in the project is swept automatically"}
         </span>
       </div>
@@ -1528,6 +1545,13 @@ function ProblemsBar() {
                 openAt(p.path, p.line, p.col);
               }}
               onDoubleClick={() => openAt(p.path, p.line, p.col)}
+              onContextMenu={(e) => {
+                // Phase 9: right-click a row → copy JUST that problem (no selection dance)
+                e.preventDefault();
+                e.stopPropagation();
+                setSel(new Set([i]));
+                setMenu({ x: e.clientX, y: e.clientY, index: i });
+              }}
             >
               <span className="pr-glyph">{p.severity === "error" ? "✖" : "⚠"}</span>
               <span className="pr-msg" title={p.message}>{p.message}</span>
@@ -1545,6 +1569,32 @@ function ProblemsBar() {
           )}
         </div>
       )}
+      {menu && (() => {
+        const p = problems[menu.index];
+        if (!p) return null;
+        const W = 230, H = 118;
+        const x = Math.max(8, Math.min(menu.x, window.innerWidth - W - 8));
+        const y = Math.max(8, Math.min(menu.y, window.innerHeight - H - 8));
+        return (
+          <div className="ctx-menu" style={{ left: x, top: y }}
+            onClick={(e) => e.stopPropagation()}
+            onContextMenu={(e) => e.preventDefault()}>
+            <button className="ctx-item"
+              onClick={() => { void copyItems([p]); setMenu(null); }}>
+              Copy this problem
+            </button>
+            <button className="ctx-item"
+              onClick={() => { void copyItems(problems); setMenu(null); }}>
+              Copy all problems ({problems.length})
+            </button>
+            <div className="ctx-sep" />
+            <button className="ctx-item"
+              onClick={() => { setMenu(null); openAt(p.path, p.line, p.col); }}>
+              Go to location
+            </button>
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -1775,6 +1825,7 @@ function EditorArea() {
             <li><b>Ctrl+P</b> quick open · <b>Ctrl+Shift+P</b> commands · <b>Ctrl+T</b> symbols</li>
             <li><b>Ctrl+Shift+F</b> search · <b>F12</b> go to definition · <b>F2</b> rename symbol project-wide</li>
             <li>Select any method/variable → the <b>uses panel</b> shows every place it is used and where it comes from</li>
+            <li><b>⚡ Call Flow</b> (graph view, or Ctrl+Shift+P → "Call Flow") — how one script's methods call each other; outside calls end as dashed terminals</li>
             <li><b>⬡</b> dependency graph — left-click the ⬡ on a folder or right-click it (4 layouts)</li>
             <li>Type <code>transform.</code>, <code>rb.</code>, or <code>Aw</code> in a class body to feel the brain</li>
             <li>Unity messages (<b>Awake / Start / Update</b>) complete at class member level</li>
@@ -1992,6 +2043,10 @@ function Palette() {
     } },
     { label: "Unity: Insert Method…", keepOpen: true, run: () => useStore.getState().setPalette("unity") },
     { label: "View: Show Dependency Graph (project)", run: () => useStore.getState().openGraph(null) },
+    { label: "View: Call Flow of Current Script", run: () => {
+      useStore.getState().openGraph(null);
+      useStore.getState().setGraphMode("flow");
+    } },
     { label: "Refactor: Rename Symbol (F2)", run: () => void startRename() },
     { label: "References: Find All Uses of Symbol (Shift+F12)", run: () => (window as any).__requestUses?.() },
     { label: "View: Toggle Explorer", run: () => useStore.getState().setSidebarView("explorer") },

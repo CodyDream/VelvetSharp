@@ -68,8 +68,8 @@ check("config hydration at boot", /hydrateConfigFromDisk/.test(js));
 check("no fragile stock client import", !/@neutralinojs\/lib/.test(js));
 
 // 4c. version system present (bumped every phase — see VERSIONS.md checklist)
-check("version chip (status bar)", /version-chip/.test(js) && js.includes("Phase 8"));
-check("Settings version row (build 8.0.0)", js.includes("8.0.0") && /settings-path/.test(js));
+check("version chip (status bar)", /version-chip/.test(js) && js.includes("Phase 9"));
+check("Settings version row (build 9.0.0)", js.includes("9.0.0") && /settings-path/.test(js));
 check("no stale 0.7.1 branding", !js.includes("v0.7.1 —"));
 
 // 4d. Phase 8 features present
@@ -78,7 +78,15 @@ check("findUses RPC wired", /findUses/.test(js));
 check("Shift+F12 find-uses keybinding", /F12/.test(js));
 check("Unity magic methods injected (injection marker)", js.includes("Unity event function"));
 check("graph nodes are types only (legend)", js.includes("enums only"));
-check("Phase 8 version chip", js.includes("Phase 8") && js.includes("8.0.0"));
+
+// 4e. Phase 9 features present
+check("call-flow view mode toggle", /graphMode/.test(js) && js.includes("Call flow"));
+check("callFlow RPC wired", /callFlow/.test(js));
+check("external terminal shape + legend", js.includes("outside the script — branch ends"));
+check("problems right-click copy menu", js.includes("Copy this problem") && js.includes("Copy all problems"));
+check("singleton self-loop legend (graph)", js.includes("static singleton"));
+check("no ambiguous-reference warnings (suppressed)", !/Ambiguous reference:/.test(js));
+check("Phase 9 version chip", js.includes("Phase 9") && js.includes("9.0.0"));
 
 // 5. no stale references to removed APIs
 check("no defineVelvetTheme remnant (theme system replaced it)", !js.includes("defineVelvetTheme"));

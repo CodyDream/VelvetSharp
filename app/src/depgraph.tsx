@@ -15,7 +15,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "./store";
-import type { BrainClient, DepGraphResult, DepNodeResult, DepEdgeResult } from "./brain-client";
+import type { BrainClient, DepGraphResult, DepNodeResult, DepEdgeResult, CallFlowResult } from "./brain-client";
 
 type LayoutName = "hierarchical" | "organic" | "circular" | "business";
 
@@ -34,6 +34,38 @@ const GAP_Y = 78;
  *  come down to match what the webview can comfortably draw. */
 const MAX_RENDER_NODES = 300;
 const MAX_RENDER_EDGES = 1000;
+
+/** Phase 9 — map a per-script call-flow result onto the shared renderer.
+ *  method nodes keep their own kind; external terminals get "extcall" (drawn
+ *  as a different SHAPE, dashed) — and traversal genuinely ends there because
+ *  the engine never emits outgoing edges from external nodes. */
+function flowToGraph(r: CallFlowResult): DepGraphResult & { flowReason?: string } {
+  if (!r.ok) return { scope: r.file, nodes: [], edges: [], truncated: false, totalTypes: 0, flowReason: r.reason };
+  const nodes: DepNodeResult[] = r.nodes.map((n) => ({
+    id: n.id,
+    name: n.label,
+    kind: n.kind === "external" ? "extcall" : "method",
+    file: r.file,
+    line: n.line,
+    ns: n.container,
+    asm: null,
+    isMono: false,
+    external: n.kind === "external",
+    refCount: 0,
+    outDeg: 0,
+    inDeg: 0,
+    ret: n.ret,
+    entry: n.entry,
+    unityMsg: n.unityMsg,
+  }));
+  const edges: DepEdgeResult[] = r.edges.map((e) => ({
+    from: e.from,
+    to: e.to,
+    kind: e.from === e.to && !e.external ? "self" : e.external ? "extcall" : "call",
+    weight: e.count,
+  }));
+  return { scope: r.file, nodes, edges, truncated: r.truncated, totalTypes: r.nodes.length };
+}
 
 /* --------------------------------- layouts --------------------------------- */
 
@@ -117,6 +149,7 @@ function layoutHierarchical(nodes: DepNodeResult[], edges: DepEdgeResult[], busi
   for (const e of edges) {
     const s = centers.get(e.from), t = centers.get(e.to);
     if (!s || !t) continue;
+    if (e.from === e.to) { outEdges.push({ edge: e, points: selfLoopPts(s) }); continue; } // Phase 9
     if (business) outEdges.push({ edge: e, points: elbow(s, t) });
     else outEdges.push({ edge: e, points: bezierDown(s, t) });
   }
@@ -127,6 +160,18 @@ function bezierDown(s: Pt, t: Pt): Pt[] {
   if (Math.abs(s.x - t.x) < 4) return [s, t];
   const midY = (s.y + t.y) / 2;
   return [s, { x: s.x, y: midY }, { x: t.x, y: midY }, t];
+}
+
+/** Phase 9: singleton self-loop — a small circular detour above the node
+ *  ("static instances … ones that link something to itself"). */
+function selfLoopPts(c: Pt): Pt[] {
+  return [
+    { x: c.x - 20, y: c.y - NODE_H / 2 },          // leaves the top edge (left of center)
+    { x: c.x - 36, y: c.y - NODE_H / 2 - 20 },
+    { x: c.x,      y: c.y - NODE_H / 2 - 34 },     // apex
+    { x: c.x + 36, y: c.y - NODE_H / 2 - 20 },
+    { x: c.x + 20, y: c.y - NODE_H / 2 },          // re-enters the top edge (arrow down)
+  ];
 }
 
 /** orthogonal business elbow: leave the bottom, cross a channel, enter the top.
@@ -205,7 +250,7 @@ function layoutOrganic(nodes: DepNodeResult[], edges: DepEdgeResult[]): { nodes:
   const centers = new Map(laid.map((l) => [l.node.id, { x: l.x + NODE_W / 2, y: l.y + NODE_H / 2 } as Pt]));
   const outEdges: LaidEdge[] = edges
     .filter((e) => centers.has(e.from) && centers.has(e.to))
-    .map((e) => ({ edge: e, points: [centers.get(e.from)!, centers.get(e.to)!] }));
+    .map((e) => ({ edge: e, points: e.from === e.to ? selfLoopPts(centers.get(e.from)!) : [centers.get(e.from)!, centers.get(e.to)!] }));
   return { nodes: laid, edges: outEdges };
 }
 
@@ -239,6 +284,7 @@ function layoutCircular(nodes: DepNodeResult[], edges: DepEdgeResult[]): { nodes
   for (const e of edges) {
     const s = centers.get(e.from), t = centers.get(e.to);
     if (!s || !t) continue;
+    if (e.from === e.to) { outEdges.push({ edge: e, points: selfLoopPts(s) }); continue; } // Phase 9
     const mx = (s.x + t.x) / 2, my = (s.y + t.y) / 2;
     const cx2 = mx * 0.35, cy2 = my * 0.35; // bend toward the center
     const steps = 14;
@@ -315,6 +361,7 @@ function computeLayout(name: LayoutName, nodes: DepNodeResult[], edges: DepEdgeR
 
 const KIND_GLYPH: Record<string, string> = {
   class: "▣", struct: "▤", interface: "◇", enum: "◫", external: "⊘",
+  method: "ƒ", extcall: "⊗",   // Phase 9 call-flow nodes
 };
 const LAYOUTS: { id: LayoutName; label: string; hint: string }[] = [
   { id: "hierarchical", label: "Hierarchical", hint: "layered top-down — dependencies flow down (Sugiyama)" },
@@ -327,7 +374,9 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
   const client = (window as any).__client as BrainClient | undefined;
   const scope = useStore((s) => s.graphScope);
   const seed = useStore((s) => s.graphSeed);
-  const [graph, setGraph] = useState<DepGraphResult | null>(null);
+  const mode = useStore((s) => s.graphMode);
+  const flowFile = useStore((s) => s.graphFlowFile);
+  const [graph, setGraph] = useState<(DepGraphResult & { flowReason?: string }) | null>(null);
   const [busy, setBusy] = useState(true);
   const [layout, setLayout] = useState<LayoutName>("hierarchical");
   const [includeExternal, setIncludeExternal] = useState(false);
@@ -338,16 +387,22 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
   const hostRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
 
-  // (re)request the graph
+  // (re)request the graph — Phase 9: "types" mode asks for the project type
+  // graph, "flow" mode asks for the ACTIVE SCRIPT's method call graph
   useEffect(() => {
     if (!client) return;
     let cancel = false;
     setBusy(true);
-    client.depGraph(scope, includeExternal)
+    const req = mode === "flow"
+      ? (flowFile
+          ? client.callFlow(flowFile).then(flowToGraph)
+          : Promise.resolve({ scope: "", nodes: [], edges: [], truncated: false, totalTypes: 0, flowReason: "open a script first, then switch to Call Flow" }))
+      : client.depGraph(scope, includeExternal);
+    req
       .then((g) => { if (!cancel) { setGraph(g); setBusy(false); setSelected(null); } })
       .catch(() => { if (!cancel) { setGraph(null); setBusy(false); } });
     return () => { cancel = true; };
-  }, [client, scope, includeExternal, seed]);
+  }, [client, scope, includeExternal, seed, mode, flowFile]);
 
   // auto-refresh when the symbol index changes while the graph is open
   // (boot finish, renames, reindex) — guards against requesting mid-boot
@@ -467,31 +522,51 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
   return (
     <div className="depgraph">
       <div className="dg-toolbar">
-        <span className="dg-title">⬢ Dependencies</span>
-        <div className="dg-layouts">
-          {LAYOUTS.map((l) => (
-            <button
-              key={l.id}
-              className={"dg-lay" + (layout === l.id ? " active" : "")}
-              title={l.hint}
-              onClick={() => setLayout(l.id)}
-            >{l.label}</button>
-          ))}
+        <span className="dg-title">{mode === "flow" ? "⚡ Call Flow" : "⬢ Dependencies"}</span>
+        <div className="dg-modes">
+          <button
+            className={"dg-lay" + (mode === "types" ? " active" : "")}
+            title="Project type graph — classes / structs / interfaces / enums and how they depend on each other"
+            onClick={() => useStore.getState().setGraphMode("types")}
+          >Types</button>
+          <button
+            className={"dg-lay" + (mode === "flow" ? " active" : "")}
+            title="Per-script call flow — how the methods of ONE script call each other; external calls end as terminal nodes"
+            onClick={() => useStore.getState().setGraphMode("flow")}
+          >Call flow</button>
         </div>
-        <select
-          className="dg-scope"
-          value={scope ?? ""}
-          title="Scope: show just one folder and its sub-folders"
-          onChange={(e) => useStore.getState().setGraphScope(e.target.value || null)}
-        >
-          {scopeOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-        </select>
-        <label className="dg-chk" title="Show Unity/BCL types the scoped code touches">
-          <input type="checkbox" checked={includeExternal} onChange={(e) => setIncludeExternal(e.target.checked)} /> Unity/BCL
-        </label>
+        {mode === "flow" ? (
+          <span className="dg-flowfile" title={flowFile ?? ""}>
+            {flowFile ? flowFile.split("/").pop() : "no script selected"}
+          </span>
+        ) : (
+          <>
+            <div className="dg-layouts">
+              {LAYOUTS.map((l) => (
+                <button
+                  key={l.id}
+                  className={"dg-lay" + (layout === l.id ? " active" : "")}
+                  title={l.hint}
+                  onClick={() => setLayout(l.id)}
+                >{l.label}</button>
+              ))}
+            </div>
+            <select
+              className="dg-scope"
+              value={scope ?? ""}
+              title="Scope: show just one folder and its sub-folders"
+              onChange={(e) => useStore.getState().setGraphScope(e.target.value || null)}
+            >
+              {scopeOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+            <label className="dg-chk" title="Show Unity/BCL types the scoped code touches">
+              <input type="checkbox" checked={includeExternal} onChange={(e) => setIncludeExternal(e.target.checked)} /> Unity/BCL
+            </label>
+          </>
+        )}
         <input
           className="dg-filter"
-          placeholder="filter types…"
+          placeholder={mode === "flow" ? "filter methods…" : "filter types…"}
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
           spellCheck={false}
@@ -502,12 +577,14 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
         {(graph?.truncated || (graph?.totalTypes ?? 0) > nodeCount) && (
           <span
             className="dg-warn"
-            title="Scope is huge — showing the most connected types. Pick a folder (⬡ on a folder or the scope dropdown) for the full picture."
+            title={mode === "flow" ? "Huge script — showing the most connected methods" : "Scope is huge — showing the most connected types. Pick a folder (⬡ on a folder or the scope dropdown) for the full picture."}
           >
-            top {nodeCount} of {graph?.totalTypes ?? nodeCount} types
+            top {nodeCount} of {graph?.totalTypes ?? nodeCount} {mode === "flow" ? "methods" : "types"}
           </span>
         )}
-        <span className="dg-stats">{busy ? "building…" : `${nodeCount} types · ${graph?.edges.length ?? 0} dependencies`}</span>
+        <span className="dg-stats">{busy ? "building…" : mode === "flow"
+          ? `${nodeCount} nodes · ${graph?.edges.length ?? 0} calls`
+          : `${nodeCount} types · ${graph?.edges.length ?? 0} dependencies`}</span>
         <button className="dg-btn dg-close" title="Close the graph (Esc)" onClick={() => { useStore.getState().closeGraph(); useStore.getState().setActive(null); }}>×</button>
       </div>
       <div
@@ -517,9 +594,15 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
         onMouseDown={onBgMouseDown}
         onDoubleClick={(e) => { if (e.target === e.currentTarget) setSelected(null); }}
       >
-        {busy && <div className="dg-empty">building the dependency graph…</div>}
+        {busy && <div className="dg-empty">building the {mode === "flow" ? "call flow" : "dependency graph"}…</div>}
         {!busy && !laid?.nodes.length && (
-          <div className="dg-empty">no types in this scope — pick another folder or open the whole project</div>
+          <div className="dg-empty">
+            {mode === "flow"
+              ? (graph?.flowReason ?? (flowFile
+                  ? "no methods found in this script"
+                  : "no script selected — open a .cs file, then switch to Call Flow"))
+              : "no types in this scope — pick another folder or open the whole project"}
+          </div>
         )}
         {laid && !!laid.nodes.length && (
           <svg className="dg-svg" width="100%" height="100%">
@@ -531,6 +614,15 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
                 <path d="M 0 0 L 10 5 L 0 10 z" fill="#4ec9b0" />
               </marker>
               <marker id="arr-uses" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#8a7fae" />
+              </marker>
+              <marker id="arr-self" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#e5a158" />
+              </marker>
+              <marker id="arr-call" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#4ec9b0" />
+              </marker>
+              <marker id="arr-extcall" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
                 <path d="M 0 0 L 10 5 L 0 10 z" fill="#8a7fae" />
               </marker>
             </defs>
@@ -545,7 +637,7 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
                     className={cls}
                     d={pathOfPoints(le.points, layout === "business")}
                     markerEnd={`url(#arr-${kind})`}
-                    strokeWidth={kind === "uses" ? 1 + Math.min(1.6, (le.edge.weight - 1) * 0.25) : undefined}
+                    strokeWidth={kind === "uses" || kind === "call" ? 1 + Math.min(1.6, (le.edge.weight - 1) * 0.25) : undefined}
                   />
                 );
               })}
@@ -553,9 +645,12 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
                 const n = l.node;
                 const dim = isDimmedNode(n.id);
                 const sel = selected === n.id;
+                const isFlow = n.kind === "method" || n.kind === "extcall";
                 const cls = "dg-node" + (n.external ? " ext" : "") + (n.outOfScope ? " out" : "")
                   + (n.isMono ? " mono" : "") + (sel ? " sel" : "") + (dim ? " dim" : "")
-                  + (n.kind === "interface" ? " iface" : "");
+                  + (n.kind === "interface" ? " iface" : "") + (n.singleton ? " singl" : "")
+                  + (n.kind === "method" ? " method" : "") + (n.kind === "extcall" ? " extcall" : "")
+                  + (isFlow && (n as any).entry ? " entry" : "");
                 return (
                   <g
                     key={n.id}
@@ -566,16 +661,41 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
                     onClick={(e) => { e.stopPropagation(); setSelected(n.id); }}
                     onDoubleClick={(e) => { e.stopPropagation(); openNodeFile(n); }}
                   >
-                    <rect className="dg-box" x={0} y={0} width={NODE_W} height={NODE_H} rx={layout === "business" ? 3 : 8} />
+                    {/* extcall nodes get a capsule body — a genuinely different SHAPE
+                        (user: "when method call something outside the script just use
+                        different shape and put end to that branch") */}
+                    <rect
+                      className="dg-box"
+                      x={0} y={0} width={NODE_W} height={NODE_H}
+                      rx={n.kind === "extcall" ? 21 : layout === "business" ? 3 : 8}
+                    />
                     <text className="dg-glyph" x={12} y={19}>{KIND_GLYPH[n.kind] ?? "▣"}</text>
                     <text className="dg-name" x={30} y={19}>{clip(n.name, 16)}</text>
                     <text className="dg-sub" x={12} y={34}>
-                      {n.external ? n.ns || "external" : [n.asm ?? "", n.file.split("/").pop() ?? ""].filter(Boolean).join(" · ")}
+                      {n.kind === "extcall"
+                        ? "outside the script — branch ends"
+                        : n.kind === "method"
+                          ? [(n as any).ret || "", n.ns].filter(Boolean).join(" · ")
+                          : n.external
+                            ? n.ns || "external"
+                            : [n.asm ?? "", n.file.split("/").pop() ?? ""].filter(Boolean).join(" · ")}
                     </text>
                     {(n.inDeg > 0 || n.outDeg > 0) && (
                       <g className="dg-degs">
                         {n.inDeg > 0 && <text x={NODE_W - 30} y={34}>↓{n.inDeg}</text>}
                         {n.outDeg > 0 && <text x={NODE_W - 14} y={34}>↑{n.outDeg}</text>}
+                      </g>
+                    )}
+                    {n.singleton && (
+                      <g className="dg-singleton" title="static singleton">
+                        <circle cx={NODE_W - 10} cy={0} r={7.5} />
+                        <text x={NODE_W - 10} y={3.5}>S</text>
+                      </g>
+                    )}
+                    {isFlow && (n as any).unityMsg && (
+                      <g className="dg-unitymsg" title="Unity event function — the engine calls it">
+                        <circle cx={10} cy={0} r={7.5} />
+                        <text x={10} y={3.5}>U</text>
                       </g>
                     )}
                   </g>
@@ -601,16 +721,18 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
               <div className="dgd-file">compiled — {selNode.ns || "(global)"}</div>
             )}
             {selNode.asm && <div className="dgd-asm">assembly: {selNode.asm}</div>}
-            <div className="dgd-list-title">Used by ({usedBy.length})</div>
+            {(selNode as any).ret && <div className="dgd-asm">returns: {(selNode as any).ret}</div>}
+            {(selNode as any).unityMsg && <div className="dgd-asm">Unity event function — the engine calls it by name</div>}
+            <div className="dgd-list-title">Called by ({usedBy.length})</div>
             <div className="dgd-list">
-              {usedBy.length === 0 && <span className="dgd-none">nothing in this scope</span>}
+              {usedBy.length === 0 && <span className="dgd-none">nothing calls this {(selNode as any).unityMsg || mode === "flow" ? "in this script" : "in this scope"}</span>}
               {usedBy.map((e) => (
                 <div key={e.from + e.kind} className={"dgd-item k-" + e.kind} onClick={() => setSelected(e.from)}>
                   <span className="dgd-arrow">{arrowFor(e.kind)}</span>{byId.get(e.from)?.name ?? e.from}
                 </div>
               ))}
             </div>
-            <div className="dgd-list-title">Uses ({usesOf.length})</div>
+            <div className="dgd-list-title">{mode === "flow" ? "Calls" : "Uses"} ({usesOf.length})</div>
             <div className="dgd-list">
               {usesOf.length === 0 && <span className="dgd-none">nothing in this scope</span>}
               {usesOf.map((e) => (
@@ -623,11 +745,24 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
           </div>
         )}
         <div className="dg-legend">
-          <span className="lg">nodes: classes · structs · interfaces · enums only</span>
-          <span className="lg lg-extends">— inheritance</span>
-          <span className="lg lg-implements">‑ ‑ interface</span>
-          <span className="lg lg-uses">— uses</span>
-          <span className="lg lg-hint">hover: highlight · click: inspect · double-click: open script · wheel: zoom · drag: pan</span>
+          {mode === "flow" ? (
+            <>
+              <span className="lg">scope: ONE script — methods and their calls</span>
+              <span className="lg lg-call">— calls in-script</span>
+              <span className="lg lg-extcall">⇢ outside the script (terminal)</span>
+              <span className="lg lg-self">↺ recursion</span>
+              <span className="lg lg-hint">ƒ method · ⊗ external terminal · U badge = Unity event · entry = nothing calls it in-script</span>
+            </>
+          ) : (
+            <>
+              <span className="lg">nodes: classes · structs · interfaces · enums only</span>
+              <span className="lg lg-extends">— inheritance</span>
+              <span className="lg lg-implements">‑ ‑ interface</span>
+              <span className="lg lg-uses">— uses</span>
+              <span className="lg lg-self">↺ static singleton</span>
+              <span className="lg lg-hint">hover: highlight · click: inspect · double-click: open script · wheel: zoom · drag: pan</span>
+            </>
+          )}
         </div>
       </div>
     </div>
@@ -635,7 +770,7 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
 }
 
 function arrowFor(kind: string): string {
-  return kind === "extends" ? "▲" : kind === "implements" ? "◇" : "→";
+  return kind === "extends" ? "▲" : kind === "implements" ? "◇" : kind === "self" ? "↺" : kind === "call" ? "→" : kind === "extcall" ? "⇢" : "→";
 }
 
 function clip(s: string, max: number): string {
