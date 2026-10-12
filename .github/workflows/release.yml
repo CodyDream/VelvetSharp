@@ -1,0 +1,107 @@
+# VelvetSharp release pipeline (CD).
+#
+# Triggered by:
+#   - pushing a tag "v*"      -> releases exactly that tag
+#   - manual workflow_dispatch -> releases v<APP_BUILD> from app/src/version.ts
+#
+# The Windows portable zip is built on a LINUX runner on purpose: the Neutralino
+# runtime binary (desktop/bin/neutralino-win_x64.exe) is committed to the repo,
+# so "neu build --release" only needs to pack platform-independent resources.neu
+# next to it — no Windows machine, no cross-compilation.
+#
+# Artifact: VelvetSharp-<tag>-win-x64-portable.zip
+#           (VelvetSharp.exe + resources.neu + README-FIRST.txt at zip root)
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            app/package-lock.json
+            packages/brain/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          npm ci --prefix packages/brain
+          npm ci --prefix app
+
+      - name: Brain engine tests
+        run: npm run test:brain
+
+      - name: Build web app (vite)
+        run: npm run build
+
+      - name: Dist markers
+        run: npm run verify:dist
+
+      - name: Resolve release version
+        id: ver
+        run: |
+          BUILD=$(grep -oP 'APP_BUILD\s*=\s*"\K[^"]+' app/src/version.ts)
+          echo "app build: $BUILD"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="v$BUILD"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          if [ "$TAG" != "v$BUILD" ]; then
+            echo "::error::tag $TAG does not match app/src/version.ts (v$BUILD). Bump the version before tagging."
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Sync app dist into desktop resources
+        run: |
+          rm -rf desktop/app/dist
+          mkdir -p desktop/app
+          cp -r app/dist desktop/app/dist
+
+      - name: Neutralino build (release)
+        run: |
+          cd desktop
+          npx neu build --release
+          ls -la dist/VelvetSharp
+
+      - name: Assemble portable zip
+        run: |
+          TAG="${{ steps.ver.outputs.tag }}"
+          mkdir -p out
+          cp desktop/dist/VelvetSharp/VelvetSharp-win_x64.exe out/VelvetSharp.exe
+          cp desktop/dist/VelvetSharp/resources.neu out/resources.neu
+          cp README-FIRST.txt out/README-FIRST.txt
+          cd out
+          zip -9 "VelvetSharp-$TAG-win-x64-portable.zip" VelvetSharp.exe resources.neu README-FIRST.txt
+          sha256sum "VelvetSharp-$TAG-win-x64-portable.zip" > "VelvetSharp-$TAG-win-x64-portable.zip.sha256"
+          ls -la
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.ver.outputs.tag }}"
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$TAG" -R "$GITHUB_REPOSITORY" out/VelvetSharp-*.zip out/VelvetSharp-*.sha256 --clobber
+          else
+            gh release create "$TAG" -R "$GITHUB_REPOSITORY" \
+              out/VelvetSharp-*.zip out/VelvetSharp-*.sha256 \
+              --title "VelvetSharp $TAG" \
+              --generate-notes
+          fi

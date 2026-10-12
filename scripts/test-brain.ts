@@ -4,9 +4,12 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { VelvetSharpEngine } from "../packages/brain/src/engine";
 
-const ROOT = "/home/z/my-project/velvetsharp";
+// derive the repo root from this file's location — keeps the suite runnable
+// anywhere (local checkout, CI runner, packaging sandbox), no hardcoded path
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEMO = path.join(ROOT, "app/demo");
 
 async function main() {

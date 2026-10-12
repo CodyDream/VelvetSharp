@@ -1,0 +1,38 @@
+# VelvetSharp CI — test on every push to main and every PR.
+# Runs the brain engine suite + the dist-marker checks against a fresh build.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            app/package-lock.json
+            packages/brain/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          npm ci --prefix packages/brain
+          npm ci --prefix app
+
+      - name: Brain engine tests
+        run: npm run test:brain
+
+      - name: Build web app (vite)
+        run: npm run build
+
+      - name: Dist markers
+        run: npm run verify:dist
