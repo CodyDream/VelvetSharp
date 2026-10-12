@@ -15,7 +15,7 @@ import {
 } from "./asmdef";
 import { semanticAnalysis } from "./diagnostics";
 import { buildDependencyGraph } from "./deps";
-import { symbolAt, computeRename } from "./rename";
+import { symbolAt, computeRename, findSymbolUses, type SymbolUsesResult } from "./rename";
 import type {
   AnalysisResult, CompletionItem, Diagnostic, FileSymbols, HoverResult,
   SearchHit, SignatureInfo, DefinitionResult, SymbolInfo, OutlineEntry,
@@ -600,10 +600,14 @@ export class VelvetSharpEngine {
       if (rt && apiTypeMatches(rt, resolved.typeFullName)) {
         return this.unity.completeMembers(rt, prefix);
       }
-      // project type
-      const members = this.projectMembers.get(resolved.typeFullName.toLowerCase())
+      // project type — Phase 8: the whole FAMILY (own + inherited + Unity messages)
+      const own = this.projectMembers.get(resolved.typeFullName.toLowerCase())
         ?? this.projectMembers.get(simple.toLowerCase());
-      if (members) return members.map((m) => this.projectMemberToItem(m, prefix));
+      if (own) {
+        const fam: CompletionItem[] = [];
+        this.familyMemberItems(st, resolved.typeFullName, prefix, new Set(), fam, new Set());
+        return fam.length ? fam : own.map((m) => this.projectMemberToItem(m, prefix));
+      }
       // enums / primitives
       if (resolved.typeFullName === "System.String") {
         return UnityApi.STRING_MEMBERS.map((s) => ({
@@ -612,7 +616,11 @@ export class VelvetSharpEngine {
         })).filter((c) => !prefix || c.label.toLowerCase().startsWith(prefix.toLowerCase()));
       }
       const simpleMembers = this.projectMembers.get(simple.toLowerCase());
-      if (simpleMembers) return simpleMembers.map((m) => this.projectMemberToItem(m, prefix));
+      if (simpleMembers) {
+        const fam: CompletionItem[] = [];
+        this.familyMemberItems(st, simple, prefix, new Set(), fam, new Set());
+        return fam.length ? fam : simpleMembers.map((m) => this.projectMemberToItem(m, prefix));
+      }
     }
     return [];
   }
@@ -630,6 +638,59 @@ export class VelvetSharpEngine {
       sortText: (m.kind === "method" ? "1" : "0") + m.name.toLowerCase(),
       filterText: m.name,
     };
+  }
+
+  /** Phase 8 — every member of a project type's FAMILY: the type's own members
+   *  (declared anywhere in the file — bottom of file included — the index is
+   *  position independent) plus inherited members walked up the base chain:
+   *  project bases recurse, Unity/BCL bases resolve through the API db (which
+   *  now carries the injected Unity messages, so MonoBehaviour-derived scripts
+   *  see Awake/Start/Update here too). `outNames` dedupes; locals win over
+   *  shadowing members by seeding it with the in-scope local names. */
+  private familyMemberItems(
+    st: FileState, typeName: string, prefix: string,
+    seenTypes: Set<string>, out: CompletionItem[], outNames: Set<string>,
+  ): void {
+    const simple = typeName.split(".").pop()!;
+    const key = simple.toLowerCase();
+    if (seenTypes.has(key)) return;
+    seenTypes.add(key);
+    const p = prefix.toLowerCase();
+
+    const collect = (arr: SymbolInfo[] | undefined) => {
+      for (const m of arr ?? []) {
+        if (m.kind === "enumMember" || m.kind === "namespace" || m.kind === "local" || m.kind === "parameter") continue;
+        if (outNames.has(m.name)) continue;
+        if (p && !m.name.toLowerCase().startsWith(p)) continue;
+        outNames.add(m.name);
+        out.push(this.projectMemberToItem(m, prefix));
+      }
+    };
+    // container keys are stored under the declaring type's name — try fqn and simple
+    collect(this.projectMembers.get(typeName.toLowerCase()));
+    collect(this.projectMembers.get(key));
+
+    // base chain
+    const typeSym = this.projectTypes.get(key)?.find((t) => t.name === simple) ?? this.projectTypes.get(key)?.[0];
+    const baseTxt = typeSym?.base ?? "";
+    for (const part of baseTxt.replace(/^\s*:\s*/, "").split(",").map((s) => s.trim()).filter(Boolean)) {
+      const baseSimple = part.replace(/<.*$/, "").split(".").pop()!.trim();
+      if (!baseSimple || /^(object|ValueType|Enum|Delegate|MulticastDelegate)$/i.test(baseSimple)) continue;
+      const projArr = this.projectTypes.get(baseSimple.toLowerCase());
+      const proj = projArr?.find((t) => t.name === baseSimple) ?? projArr?.[0];
+      if (proj) {
+        this.familyMemberItems(st, proj.fqn || proj.name, prefix, seenTypes, out, outNames);
+        continue;
+      }
+      const rt = this.unity.findType(baseSimple);
+      if (rt) {
+        for (const item of this.unity.completeMembers(rt, prefix)) {
+          if (outNames.has(item.label)) continue;
+          outNames.add(item.label);
+          out.push(item);
+        }
+      }
+    }
   }
 
   private completeBare(st: FileState, line: number, col: number, prefix: string): CompletionItem[] {
@@ -662,6 +723,19 @@ export class VelvetSharpEngine {
         detail: `${prettyLocalType(s.returnType ?? "")} ${s.name}`,
         sortText: "0" + s.name.toLowerCase(),
       });
+    }
+
+    // Phase 8 — the enclosing class's OWN members (methods/fields/properties —
+    // including ones declared BELOW the caret) + inherited members from base
+    // classes and Unity messages. Bare completions used to offer only locals,
+    // so calling a sibling method written at the bottom of the file (or on the
+    // base class) showed nothing — exactly what the user reported.
+    const curType = this.currentTypeName(st, line, col);
+    if (curType) {
+      const fam: CompletionItem[] = [];
+      const famNames = new Set<string>(scope.map((s) => s.name)); // locals shadow members
+      this.familyMemberItems(st, curType, prefix, new Set(), fam, famNames);
+      out.push(...fam);
     }
 
     // snippets — Unity templates + C# statement snippets (if / for / forr /
@@ -1277,6 +1351,12 @@ export class VelvetSharpEngine {
   /** full project-wide rename plan (ranges are 0-based, sorted bottom-up) */
   rename(path: string, line: number, col: number, newName: string): RenamePlan {
     return computeRename(this, path, line, col, newName);
+  }
+
+  /** Phase 8 — every project reference of the symbol at the caret + its origin
+   *  (the usages panel). Same machinery as F2 rename, read-only. */
+  findUses(path: string, line: number, col: number): SymbolUsesResult {
+    return findSymbolUses(this, path, line, col);
   }
 
   /** files indexed from the startup cache that have no parse tree yet —

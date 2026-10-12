@@ -67,10 +67,18 @@ check("disk-backed config store", js.includes("config.json") && /VelvetSharp/.te
 check("config hydration at boot", /hydrateConfigFromDisk/.test(js));
 check("no fragile stock client import", !/@neutralinojs\/lib/.test(js));
 
-// 4c. Phase 7 version system present
-check("Phase 7 version chip (status bar)", js.includes("Phase 7") && /version-chip/.test(js));
-check("Settings version row (build 7.0.0)", js.includes("7.0.0") && /settings-path/.test(js));
+// 4c. version system present (bumped every phase — see VERSIONS.md checklist)
+check("version chip (status bar)", /version-chip/.test(js) && js.includes("Phase 8"));
+check("Settings version row (build 8.0.0)", js.includes("8.0.0") && /settings-path/.test(js));
 check("no stale 0.7.1 branding", !js.includes("v0.7.1 —"));
+
+// 4d. Phase 8 features present
+check("usages panel (select symbol → uses + origin)", js.includes("Uses of") && /uses-list|uses-panel/.test(js));
+check("findUses RPC wired", /findUses/.test(js));
+check("Shift+F12 find-uses keybinding", /F12/.test(js));
+check("Unity magic methods injected (injection marker)", js.includes("Unity event function"));
+check("graph nodes are types only (legend)", js.includes("enums only"));
+check("Phase 8 version chip", js.includes("Phase 8") && js.includes("8.0.0"));
 
 // 5. no stale references to removed APIs
 check("no defineVelvetTheme remnant (theme system replaced it)", !js.includes("defineVelvetTheme"));

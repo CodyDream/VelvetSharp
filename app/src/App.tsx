@@ -510,9 +510,15 @@ function App() {
     const onKey = (e: KeyboardEvent) => {
       // F2 — rename the symbol under the caret (editor focused or not)
       if (e.key === "F2") { e.preventDefault(); void startRename(); return; }
+      // Shift+F12 — find all uses of the symbol under the caret (Phase 8)
+      if (e.key === "F12" && e.shiftKey) { e.preventDefault(); (window as any).__requestUses?.(); return; }
       // Esc — leave the dependency graph
       if (e.key === "Escape" && useStore.getState().active === "__graph__") {
         e.preventDefault(); closeGraphAction(); return;
+      }
+      // Esc — close the usages panel (Phase 8)
+      if (e.key === "Escape" && useStore.getState().uses) {
+        useStore.getState().closeUses(); return;
       }
       // Alt+Z — word wrap toggle (v0.7.0)
       if (e.altKey && (e.key === "z" || e.key === "Z") && !e.ctrlKey && !e.metaKey) {
@@ -1545,6 +1551,61 @@ function ProblemsBar() {
 
 /* ------------------------------ editor ------------------------------ */
 
+/** Phase 8 — usages panel (user: "when selected method or variable it shows in
+ *  window like the error and warning window the places that method or variable
+ *  ... able to point where does it come from"). Select a symbol → every project
+ *  reference (declaration first) + a header stating WHERE the symbol comes from
+ *  (file:line · assembly). Rows click-jump. Esc / × closes. */
+function UsesBar() {
+  const uses = useStore((s) => s.uses);
+  const active = useStore((s) => s.active);
+  if (!uses) return null;
+  const r = uses.result;
+  return (
+    <div className="uses-panel" data-testid="uses-panel">
+      <div className="uses-header" title={r?.origin || r?.reason || ""}>
+        <span className="uses-glyph">◈</span>
+        {uses.loading ? (
+          <span className="uses-title">finding uses…</span>
+        ) : r?.ok ? (
+          <>
+            <span className="uses-title">Uses of <b>{r.name}</b></span>
+            <span className="uses-count">{r.uses.length} reference{r.uses.length === 1 ? "" : "s"}</span>
+            <span className="uses-origin" title={r.origin}>{r.origin}</span>
+          </>
+        ) : (
+          <span className="uses-title">{r?.reason ?? "select a symbol to see where it is used"}</span>
+        )}
+        <span className="spacer" />
+        <button className="uses-close" onClick={() => useStore.getState().closeUses()} title="close (Esc)">×</button>
+      </div>
+      {r?.ok && !!r.uses.length && (
+        <div className="uses-list">
+          {r.uses.slice(0, 300).map((u, i) => (
+            <div
+              key={`${u.file}:${u.line}:${u.col}:${i}`}
+              className={"use-row" + (u.isDecl ? " is-decl" : "") + (u.file === active ? " in-active" : "")}
+              onClick={() => { void openAt(u.file, u.line, u.col); }}
+              title={`${u.file}:${u.line + 1}:${u.col + 1} — click to jump`}
+            >
+              <span className={"use-kind" + (u.isDecl ? " decl" : "")}>{u.isDecl ? "decl" : "ref"}</span>
+              <span className="use-text">{u.text || "—"}</span>
+              <span className="use-file">{u.file.split("/").pop()}:{u.line + 1}:{u.col + 1}</span>
+            </div>
+          ))}
+          {r.uses.length > 300 && <div className="problems-empty">…and {r.uses.length - 300} more</div>}
+        </div>
+      )}
+      {r?.ok && !r.uses.length && (
+        <div className="problems-empty">
+          {r.origin ? "Compiled API symbol — it comes from the engine assemblies, not your scripts." : "No project references found."}
+        </div>
+      )}
+      {!!r?.warnings?.length && <div className="uses-warn">⚠ {r.warnings.join(" · ")}</div>}
+    </div>
+  );
+}
+
 function EditorArea() {
   const active = useStore((s) => s.active);
   const tabs = useStore((s) => s.tabs);
@@ -1601,6 +1662,50 @@ function EditorArea() {
         const el2 = document.getElementById("cursor-pos");
         if (el2) el2.textContent = `Ln ${e.position.lineNumber}, Col ${e.position.column}`;
       });
+
+      // ---- Phase 8 — usages panel triggers ----
+      // Select (double-click or drag) a symbol → the panel under the editor lists
+      // every place it is used + where it comes from. Empty selections are IGNORED
+      // so clicking a use-row (which moves the caret) never closes the panel.
+      let usesTimer: any = null;
+      const requestUsesFromSelection = () => {
+        const ed = edRef.current;
+        if (!ed) return;
+        const st = useStore.getState();
+        if (!st.active || st.active === "__graph__") return;
+        const sel = ed.getSelection?.();
+        const model = ed.getModel?.();
+        if (!sel || !model || sel.isEmpty()) return; // keep the current panel
+        const text = model.getValueInRange(sel);
+        if (!text || /\s/.test(text) || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(text)) return;
+        const client = (window as any).__client;
+        if (!client?.findUses) return;
+        st.setUsesLoading();
+        const myReq = useStore.getState().uses?.reqId ?? 0;
+        client.findUses(st.active, sel.startLineNumber - 1, sel.startColumn - 1)
+          .then((res: any) => {
+            const cur = useStore.getState().uses;
+            if (!cur || cur.reqId !== myReq) return; // a newer request superseded this one
+            useStore.getState().setUses(res);
+          })
+          .catch(() => { /* engine busy — leave the panel as it was */ });
+      };
+      edRef.current.onDidChangeCursorSelection(() => {
+        if (usesTimer) clearTimeout(usesTimer);
+        usesTimer = setTimeout(requestUsesFromSelection, 320);
+      });
+      // Shift+F12 — word under the caret, no selection needed
+      (window as any).__requestUses = () => {
+        const ed = edRef.current;
+        if (!ed) return;
+        const pos = ed.getPosition?.();
+        const model = ed.getModel?.();
+        if (!pos || !model) return;
+        const word = model.getWordAtPosition(pos);
+        if (!word) return;
+        ed.setSelection(new monaco.Range(pos.lineNumber, word.startColumn, pos.lineNumber, word.endColumn));
+        setTimeout(requestUsesFromSelection, 0);
+      };
       // a fresh editor must show the current tab (same rel path can exist in a
       // different project — the model-switch effect would not re-run for it)
       const st = useStore.getState();
@@ -1669,6 +1774,7 @@ function EditorArea() {
           <ul>
             <li><b>Ctrl+P</b> quick open · <b>Ctrl+Shift+P</b> commands · <b>Ctrl+T</b> symbols</li>
             <li><b>Ctrl+Shift+F</b> search · <b>F12</b> go to definition · <b>F2</b> rename symbol project-wide</li>
+            <li>Select any method/variable → the <b>uses panel</b> shows every place it is used and where it comes from</li>
             <li><b>⬡</b> dependency graph — left-click the ⬡ on a folder or right-click it (4 layouts)</li>
             <li>Type <code>transform.</code>, <code>rb.</code>, or <code>Aw</code> in a class body to feel the brain</li>
             <li>Unity messages (<b>Awake / Start / Update</b>) complete at class member level</li>
@@ -1697,6 +1803,7 @@ function EditorArea() {
         )}
       </div>
       <ProblemsBar />
+      <UsesBar />
       {showGraph ? (
         <DepGraphView onOpen={(p, l, c) => { void openAt(p, l, c); }} />
       ) : null}
@@ -1886,6 +1993,7 @@ function Palette() {
     { label: "Unity: Insert Method…", keepOpen: true, run: () => useStore.getState().setPalette("unity") },
     { label: "View: Show Dependency Graph (project)", run: () => useStore.getState().openGraph(null) },
     { label: "Refactor: Rename Symbol (F2)", run: () => void startRename() },
+    { label: "References: Find All Uses of Symbol (Shift+F12)", run: () => (window as any).__requestUses?.() },
     { label: "View: Toggle Explorer", run: () => useStore.getState().setSidebarView("explorer") },
     { label: "View: Toggle Search Panel", run: () => useStore.getState().setSidebarView("search") },
     { label: "View: Toggle Outline", run: () => useStore.getState().setSidebarView("outline") },

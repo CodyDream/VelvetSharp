@@ -1,6 +1,6 @@
 {
   "name": "velvetsharp",
-  "version": "7.0.0",
+  "version": "8.0.0",
   "description": "VelvetSharp — lightweight Unity C# IDE (Neutralino + custom C# intelligence engine)",
   "private": true,
   "scripts": {

@@ -378,14 +378,77 @@ export function computeRename(
     return { ok: true, target, newName, edits: [], warnings: ["name is unchanged — nothing to do"] };
   }
 
+  const { refs, unparsed, ambiguous } = collectRefs(engine, target);
+
+  if (target.scope === "member") {
+    if (target.kind === "field") {
+      warnings.push("Unity serializes fields by name — scene/prefab Inspector links keep the old name until re-linked in the Editor.");
+    }
+    if (target.kind === "method" && UNITY_MESSAGE_NAMES.has(target.name)) {
+      warnings.push(`'${target.name}' is a Unity message — the engine calls it by name, so renaming changes when (and if) Unity invokes it.`);
+    }
+  }
+
+  if (ambiguous.size) {
+    warnings.push(`${ambiguous.size} file${ambiguous.size === 1 ? "" : "s"} skipped — another type named '${target.name}' is visible there; rename those manually.`);
+  }
+
+  if (unparsed > 0) {
+    warnings.push(`${unparsed} script${unparsed === 1 ? "" : "s"} not loaded yet were skipped — open the workspace fully (Brain: Reindex Workspace) for 100% coverage.`);
+  }
+
+  // Unity file pairing: class Foo in Foo.cs → move Foo.cs + Foo.cs.meta
+  if (target.scope === "type" && (target.kind === "class" || target.kind === "struct")) {
+    const base = target.declFile.split("/").pop() ?? "";
+    if (base.toLowerCase() === target.name.toLowerCase() + ".cs") {
+      warnings.push(`class file will be renamed to ${newName}.cs (and its .meta — the asset GUID is preserved).`);
+      warnings.push("Unity scene/prefab references use the asset GUID, so components keep working after the rename.");
+    }
+  }
+
+  const edits: RenameFileEdits[] = [...refs.entries()]
+    .map(([fpath, ranges]) => ({
+      path: fpath,
+      ranges: ranges.sort((a, b) => b.line - a.line || b.col - a.col), // bottom-up for stable application
+    }))
+    .filter((e) => e.ranges.length > 0);
+
+  let fileRename: RenamePlan["fileRename"] = null;
+  if (target.scope === "type" && (target.kind === "class" || target.kind === "struct") && newName) {
+    const base = target.declFile.split("/").pop() ?? "";
+    if (base.toLowerCase() === target.name.toLowerCase() + ".cs" && newName.toLowerCase() !== target.name.toLowerCase()) {
+      const dir = target.declFile.includes("/") ? target.declFile.slice(0, target.declFile.lastIndexOf("/")) : "";
+      fileRename = {
+        from: target.declFile,
+        to: (dir ? dir + "/" : "") + newName + ".cs",
+        metaFrom: target.declFile + ".meta",
+        metaTo: (dir ? dir + "/" : "") + newName + ".cs.meta",
+      };
+    }
+  }
+
+  return { ok: true, target, newName: newName || undefined, edits, fileRename, warnings };
+}
+
+/* ======================= Phase 8 — find all uses ======================= */
+
+/** collected reference ranges per file + diagnostics shared by rename and find-uses */
+interface CollectedRefs {
+  refs: Map<string, CollectedRef[]>;
+  unparsed: number;
+  ambiguous: Set<string>;
+}
+
+function collectRefs(engine: any, target: RenameTarget): CollectedRefs {
   const refs = new Map<string, CollectedRef[]>();
   const files = engine.files as Map<string, { content: string; tree: Tree | null; symbols: FileSymbols }>;
   let unparsed = 0;
+  const ambiguous = new Set<string>();
 
   /* ---------------- local / parameter ---------------- */
   if (target.scope === "local") {
     const st = files.get(target.declFile);
-    if (!st?.tree) return { ok: false, reason: "declaring script is not parsed yet", target, edits: [], warnings: [] };
+    if (!st?.tree) return { refs, unparsed, ambiguous };
     addRef(refs, target.declFile, target.declLine, target.declCol, target.name.length);
     const block = enclosingBlock(st.tree, target.declLine, target.declCol) ?? st.tree.rootNode;
     const visit = (n: SyntaxNode) => {
@@ -453,13 +516,6 @@ export function computeRename(
         // decl refs of the same member kind in family containers were added above via the index
       }
     }
-
-    if (target.kind === "field") {
-      warnings.push("Unity serializes fields by name — scene/prefab Inspector links keep the old name until re-linked in the Editor.");
-    }
-    if (target.kind === "method" && UNITY_MESSAGE_NAMES.has(target.name)) {
-      warnings.push(`'${target.name}' is a Unity message — the engine calls it by name, so renaming changes when (and if) Unity invokes it.`);
-    }
   }
 
   /* ---------------- type ---------------- */
@@ -471,7 +527,6 @@ export function computeRename(
     // same simple name declared elsewhere → per-file ambiguity guard
     const rivals = ([...(engine.projectTypes as Map<string, SymbolInfo[]>).values()].flat())
       .filter((t) => t.name.toLowerCase() === simpleLower && (t.fqn || t.name).toLowerCase() !== target.fqn.toLowerCase());
-    const ambiguousFiles = new Set<string>();
 
     addRef(refs, target.declFile, target.declLine, target.declCol, target.name.length);
 
@@ -495,54 +550,113 @@ export function computeRename(
           if (owner === target.name) addRef(refs, fpath, r.line, r.col, r.length);
           continue;
         }
-        if (rivalVisible && r.ctx !== "typePos") { ambiguousFiles.add(fpath); continue; }
-        if (rivalVisible && r.ctx === "typePos") {
-          // type positions with a visible rival: skip to stay safe
-          ambiguousFiles.add(fpath);
-          continue;
-        }
+        if (rivalVisible) { ambiguous.add(fpath); continue; }
         addRef(refs, fpath, r.line, r.col, r.length);
       }
     }
-    if (ambiguousFiles.size) {
-      warnings.push(`${ambiguousFiles.size} file${ambiguousFiles.size === 1 ? "" : "s"} skipped — another type named '${target.name}' is visible there; rename those manually.`);
-    }
-    // Unity file pairing: class Foo in Foo.cs → move Foo.cs + Foo.cs.meta
-    const base = target.declFile.split("/").pop() ?? "";
-    if ((target.kind === "class" || target.kind === "struct") && base.toLowerCase() === target.name.toLowerCase() + ".cs") {
-      const dir = target.declFile.includes("/") ? target.declFile.slice(0, target.declFile.lastIndexOf("/")) : "";
-      const to = (dir ? dir + "/" : "") + newName + ".cs";
-      warnings.push(`class file will be renamed to ${newName}.cs (and its .meta — the asset GUID is preserved).`);
-      warnings.push("Unity scene/prefab references use the asset GUID, so components keep working after the rename.");
-    }
   }
 
-  if (unparsed > 0) {
-    warnings.push(`${unparsed} script${unparsed === 1 ? "" : "s"} not loaded yet were skipped — open the workspace fully (Brain: Reindex Workspace) for 100% coverage.`);
+  return { refs, unparsed, ambiguous };
+}
+
+/** Phase 8 — one hit for the usages panel. */
+export interface UseHit {
+  file: string;
+  line: number;         // 0-based
+  col: number;          // 0-based
+  length: number;
+  text: string;         // trimmed source line for the panel row
+  isDecl: boolean;
+}
+
+/** Phase 8 (user: "when selected method or variable it shows in window like the
+ *  error and warning window the places that method or variable ... able to point
+ *  where does it come from") — resolve the symbol at the caret and return every
+ *  project reference plus a human-readable origin. Same resolution machinery as
+ *  F2 rename, so scope/family/override rules stay identical. */
+export interface SymbolUsesResult {
+  ok: boolean;
+  reason?: string;
+  name?: string;
+  kind?: string;
+  container?: string;
+  declFile?: string;
+  declLine?: number;
+  declCol?: number;
+  origin?: string;      // "method Enemy.TakeDamage — Assets/.../Enemy.cs:42 · Assembly-CSharp"
+  uses: UseHit[];
+  warnings: string[];
+}
+
+export function findSymbolUses(engine: any, path: string, line: number, col: number): SymbolUsesResult {
+  const files = engine.files as Map<string, { content: string; tree: Tree | null; symbols: FileSymbols }>;
+  const at = symbolAt(engine, path, line, col);
+  if (!at.ok) {
+    // not a project symbol — but if it is a compiled API type we can still say WHERE IT COMES FROM
+    const st = files.get(path);
+    if (st?.tree) {
+      const ident = identAtCaret(st, line, col);
+      const nm = ident?.text ?? "";
+      if (nm) {
+        const rt = engine.unity.findType(nm);
+        if (rt) {
+          return {
+            ok: true, name: rt.name, kind: rt.info.kind ?? "class", container: rt.ns,
+            declFile: "", declLine: 0, declCol: 0,
+            origin: `${rt.fullName} — compiled API (${(engine.unity.assemblyNames?.() ?? []).join(", ") || "Unity/BCL"})`,
+            uses: [],
+            warnings: [],
+          };
+        }
+      }
+    }
+    return { ok: false, reason: at.reason, uses: [], warnings: [] };
   }
 
-  const edits: RenameFileEdits[] = [...refs.entries()]
-    .map(([fpath, ranges]) => ({
-      path: fpath,
-      ranges: ranges.sort((a, b) => b.line - a.line || b.col - a.col), // bottom-up for stable application
-    }))
-    .filter((e) => e.ranges.length > 0);
+  const target = at.target;
+  const { refs, unparsed, ambiguous } = collectRefs(engine, target);
 
-  let fileRename: RenamePlan["fileRename"] = null;
-  if (target.scope === "type" && (target.kind === "class" || target.kind === "struct") && newName) {
-    const base = target.declFile.split("/").pop() ?? "";
-    if (base.toLowerCase() === target.name.toLowerCase() + ".cs" && newName.toLowerCase() !== target.name.toLowerCase()) {
-      const dir = target.declFile.includes("/") ? target.declFile.slice(0, target.declFile.lastIndexOf("/")) : "";
-      fileRename = {
-        from: target.declFile,
-        to: (dir ? dir + "/" : "") + newName + ".cs",
-        metaFrom: target.declFile + ".meta",
-        metaTo: (dir ? dir + "/" : "") + newName + ".cs.meta",
-      };
+  const uses: UseHit[] = [];
+  for (const [fpath, ranges] of refs) {
+    const st = files.get(fpath);
+    const lines = st ? st.content.split("\n") : [];
+    for (const r of ranges) {
+      uses.push({
+        file: fpath, line: r.line, col: r.col, length: r.length,
+        text: (lines[r.line] ?? "").trim().slice(0, 240),
+        isDecl: fpath === target.declFile && r.line === target.declLine && r.col === target.declCol,
+      });
     }
   }
+  uses.sort((a, b) => (b.isDecl ? 1 : 0) - (a.isDecl ? 1 : 0) || a.file.localeCompare(b.file) || a.line - b.line || a.col - b.col);
 
-  return { ok: true, target, newName: newName || undefined, edits, fileRename, warnings };
+  const warnings: string[] = [];
+  if (unparsed > 0) warnings.push(`${unparsed} script${unparsed === 1 ? "" : "s"} not parsed yet — some references may be missing until the workspace is fully indexed.`);
+  if (ambiguous.size > 0) warnings.push(`${ambiguous.size} file${ambiguous.size === 1 ? "" : "s"} skipped — another type named '${target.name}' is visible there.`);
+
+  const where = `${target.declFile}:${(target.declLine ?? 0) + 1}`;
+  const asm: string | null = engine.assemblyOf ? engine.assemblyOf(target.declFile) : null;
+  let origin: string;
+  if (target.scope === "member" && target.container) {
+    origin = `${target.kind} ${target.container.split(".").pop()}.${target.name} — ${where}${asm ? ` · ${asm}` : ""}`;
+  } else if (target.scope === "type") {
+    origin = `${target.kind} ${target.name}${target.container ? ` in ${target.container}` : ""} — ${where}${asm ? ` · ${asm}` : ""}`;
+  } else {
+    origin = `${target.kind} ${target.name} — ${where}`;
+  }
+
+  return {
+    ok: true,
+    name: target.name,
+    kind: target.kind,
+    container: target.container,
+    declFile: target.declFile,
+    declLine: target.declLine,
+    declCol: target.declCol,
+    origin,
+    uses,
+    warnings,
+  };
 }
 
 function refCtxOf(refs: IdentRef[] | undefined, n: SyntaxNode): IdentRef["ctx"] {

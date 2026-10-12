@@ -1,6 +1,7 @@
 /** VelvetSharp brain — Unity API layer: loads the generated DB, answers member/type queries */
-import type { ApiDb, ApiType, ApiMethod, ApiProp, ApiField } from "../../metadata/src/build";
+import type { ApiDb, ApiType, ApiMethod, ApiParam, ApiProp, ApiField } from "../../metadata/src/build";
 import { prettyType, methodSignature } from "./pretty";
+import { UNITY_LIFECYCLE } from "./snippets";
 import type { CompletionItem } from "./types";
 
 export interface ResolvedMember {
@@ -60,6 +61,7 @@ export class UnityApi {
     this.memberCount = 0;
     this.assemblyLabel = `${db.assembly} ${db.version}`;
     this.mergeInto(db);
+    this.injectMagicMethods();
     this.rebuildNamespaceList();
   }
 
@@ -68,7 +70,49 @@ export class UnityApi {
     this.dbs.push(db);
     this.membersCache.clear(); // cross-assembly base chains may now resolve
     this.mergeInto(db);
+    this.injectMagicMethods();
     this.rebuildNamespaceList();
+  }
+
+  /** Phase 8 (user: "awake start update those magic methods... dont show up in
+   *  auto complete"): Unity's message methods (Awake/Start/Update/FixedUpdate/
+   *  OnCollisionEnter…) are called BY NAME by the engine but are NOT real .NET
+   *  methods on MonoBehaviour, so the DLL metadata db never contained them.
+   *  We synthesize them onto UnityEngine.MonoBehaviour (as `void Name(params)`,
+   *  instance, protected-by-convention) so every MonoBehaviour-derived type —
+   *  project scripts included — now offers them in member/`this.` completions,
+   *  hover and signature help through the normal member walk. */
+  private injectMagicMethods(): void {
+    // NB: typeByFull keys are LOWERCASED (see mergeInto) — a mixed-case lookup here silently no-ops
+    const mb = this.typeByFull.get("unityengine.monobehaviour");
+    if (!mb) return;
+    const info = mb.info;
+    info.m = info.m ?? [];
+    const existing = new Set(info.m.map((m) => m.n));
+    let added = 0;
+    for (const l of UNITY_LIFECYCLE) {
+      if (existing.has(l.name)) continue;
+      const ps: ApiParam[] = (l.params ? l.params.split(",") : [])
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .map((p) => {
+          const parts = p.split(/\s+/);
+          return { n: parts[parts.length - 1] ?? "arg", t: parts.slice(0, -1).join(" ") || "object" };
+        });
+      const m: ApiMethod = {
+        n: l.name,
+        ret: "void",
+        ps,
+        d: `${l.doc}\n\nUnity event function — the engine calls it by name; keep the signature exact.`,
+      };
+      info.m.push(m);
+      added++;
+      this.memberCount++;
+    }
+    this.membersCache.clear(); // rebuilt lazily — next membersOf() sees the injected methods
+    if (added) {
+      this.assemblyLabel += ` · +${added} Unity messages`;
+    }
   }
 
   private mergeInto(db: ApiDb): void {

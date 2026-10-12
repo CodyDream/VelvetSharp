@@ -2,7 +2,7 @@
 
 **A lightweight, fast-opening Unity C# IDE — an alternative to Rider, Visual Studio and VS Code.**
 
-> **Current version: Phase 7** (build 7.0.0) — see `VERSIONS.md`. The version
+> **Current version: Phase 8** (build 8.0.0) — see `VERSIONS.md`. The version
 > system is phase-based: every delivered update bumps the phase by one and
 > numbers are never reused. The phase is always visible in the status bar.
 

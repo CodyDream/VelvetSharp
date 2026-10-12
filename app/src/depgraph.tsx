@@ -29,9 +29,11 @@ const GAP_X = 26;
 const GAP_Y = 78;
 
 /** v0.6.1 crash guard — the brain already caps nodes/edges; these are the
- *  render-side backstops. Beyond ~2500 SVG paths WebView2 gives up. */
-const MAX_RENDER_NODES = 620;
-const MAX_RENDER_EDGES = 2400;
+ *  render-side backstops. Phase 8: the brain now emits type declarations only
+ *  (classes/structs/interfaces/enums) with far fewer edges, so the render caps
+ *  come down to match what the webview can comfortably draw. */
+const MAX_RENDER_NODES = 300;
+const MAX_RENDER_EDGES = 1000;
 
 /* --------------------------------- layouts --------------------------------- */
 
@@ -219,7 +221,10 @@ function layoutCircular(nodes: DepNodeResult[], edges: DepEdgeResult[]): { nodes
   const { rows, maxLayer } = layered(nodes, edges);
   const order: string[] = [];
   for (let li = maxLayer; li >= 0; li--) rows[li].sort((a, b) => byId.get(a)!.name.localeCompare(byId.get(b)!.name)).forEach((id) => order.push(id));
-  for (const n of nodes) if (!order.includes(n.id)) order.push(n.id);
+  // Phase 8: the `!order.includes(n.id)` fallback was O(n²) — a Set keeps the
+  // huge-project path linear (part of the graph-crash hardening)
+  const ordered = new Set(order);
+  for (const n of nodes) if (!ordered.has(n.id)) order.push(n.id);
   const R = Math.max(230, (order.length * (NODE_W + 18)) / (2 * Math.PI));
   const laid: LaidNode[] = [];
   const centers = new Map<string, Pt>();
@@ -618,6 +623,7 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
           </div>
         )}
         <div className="dg-legend">
+          <span className="lg">nodes: classes · structs · interfaces · enums only</span>
           <span className="lg lg-extends">— inheritance</span>
           <span className="lg lg-implements">‑ ‑ interface</span>
           <span className="lg lg-uses">— uses</span>

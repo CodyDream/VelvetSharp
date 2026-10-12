@@ -386,9 +386,21 @@ function stripGeneric(s: string): string {
 /* ------------------------- ref / out argument misuse ------------------------- */
 
 function checkRefOutArgs(ctx: Ctx, root: SyntaxNode): void {
+  // Argument expressions that are always legal targets for ref/out/in:
+  //  - identifier                 → pre-declared variable or discard (`out seconds`, `out _`)
+  //  - declaration_expression     → OUT VARIABLE DECLARATION (`out int result`, `out var found`).
+  //    These are legal C# declaration expressions: the argument DECLARES the variable at the
+  //    call site, so they must never be flagged (Task 17-a: user reported false warnings on
+  //    `int.TryParse("42", out int result)` / `d.TryGetValue("k", out var found)`).
+  //  - member_access_expression / this_expression → `out obj.field`, `out this.x`. A FIELD is
+  //    assignable, so flagging every member chain false-positives on perfectly legal code —
+  //    and the user's standing rule is "never invent warnings". Only flag what is PROVABLY
+  //    wrong (literals, invocations, tuples…).
+  //  - element_access_expression  → array/list element (`out slots[i]`)
+  //  - parenthesized_expression   → `out (x)`
   const ALLOWED = new Set([
-    "identifier", "member_access_expression", "this_expression",
-    "element_access_expression", "parenthesized_expression",
+    "identifier", "declaration_expression", "member_access_expression",
+    "this_expression", "element_access_expression", "parenthesized_expression",
   ]);
   for (const arg of root.descendantsOfType("argument")) {
     const m = arg.text.match(/^\s*(ref|out|in)\s+\S/);
@@ -520,6 +532,10 @@ function isTypePosition(id: SyntaxNode): boolean {
   if (!p) return false;
   // never inside a qualified chain — `System.IO.File` is already fully qualified
   if (p.type === "qualified_name") return false;
+  // …including `System.Collections.Generic.Dictionary<string, int>` where the generic NAME
+  // identifier sits inside a generic_name that is itself INSIDE the qualified chain
+  // (Task 17-a probe: fired a false CS0246 "missing using" on a fully-qualified type)
+  if (p.type === "generic_name" && p.parent?.type === "qualified_name") return false;
   // generic_name is only a type when it is NOT the function of an invocation
   // (`GetComponent<T>()` — T's parent generic_name is the invoked method)
   if (p.type === "generic_name" && p.parent?.type === "invocation_expression"

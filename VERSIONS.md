@@ -14,16 +14,17 @@
 | 5 | 0.5.0 | 2026-10 | asmdef assembly hunting (GUID→assembly), per-assembly completion gating, missing-using quick fix, project Problems bar, overload-aware duplicates, statement snippets, per-project warm-start cache |
 | 6 | 0.6.0 | 2026-10 | dependency graph (Hierarchical/Organic/Circular/Business, folder scoping, externals), F2 project-wide rename with receiver resolution + .meta pairing |
 | **7** | **7.0.0** | **2026-10-13** | self-healing native bridge (timeouts, auto-reconnect, token recovery, health chip), "void→oid" parse-corruption root-cause fix, error popup with stack trace, disk-backed settings (%APPDATA% config.json), ⚙ Settings modal, crash-proof circular layout, dblclick-opens-file fix, portable-first packaging + source-code drop |
-| 8 | _next delivery_ | — | — |
+| **8** | **8.0.0** | **2026-10-13** | dependency graph: nodes = classes/structs/interfaces/enums ONLY + exact-case edge guard (no more connection spam) + O(n²) worker hot-spot fixed (the graph "crash"), completions see the whole file + base-class family (`this.` included), Unity magic methods (Awake/Start/Update… 34 messages) injected into MonoBehaviour with docs, symbol USES panel (select → every reference + origin, Shift+F12), `out` variable declarations no longer false-flagged + FQ-generic CS0246 fix. Verified: 118 engine + 37 dist + 24/24 visual E2E |
+| 9 | _next delivery_ | — | — |
 
 ## Build identity
 
-- Window title: `VelvetSharp — Phase 7`
-- Status bar chip: `Phase 7` (click → Settings)
-- Settings → version: `VelvetSharp Phase 7 · build 7.0.0`
+- Window title: `VelvetSharp — Phase 8`
+- Status bar chip: `Phase 8` (click → Settings)
+- Settings → version: `VelvetSharp Phase 8 · build 8.0.0`
 - Source of truth: `app/src/version.ts` (`APP_PHASE`, `APP_BUILD`)
 - Mirror locations: root `package.json`, `app/package.json`,
-  `desktop/neutralino.config.json` (all `7.0.0`)
+  `desktop/neutralino.config.json` (all `8.0.0`)
 
 ## Next delivery checklist (do this every prompt)
 

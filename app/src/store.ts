@@ -1,6 +1,7 @@
 /** VelvetSharp — global state (zustand) */
 import { create } from "zustand";
 import { saveConfigField } from "./configStore"; // v0.7.1: prefs also persist to %APPDATA% config.json
+import type { SymbolUsesResult } from "./brain-client"; // Phase 8 — usages panel
 
 export interface Tab { path: string; content: string; original: string; cursor?: { line: number; col: number } }
 
@@ -96,6 +97,12 @@ interface VSState {
   setBridge: (b: VSState["bridge"]) => void;
   setSettingsOpen: (v: boolean) => void;
 
+  // Phase 8 — usages panel (like the Problems bar, but for the selected symbol)
+  uses: null | { loading: boolean; result: SymbolUsesResult | null; reqId: number };
+  setUsesLoading: () => void;
+  setUses: (result: SymbolUsesResult) => void;
+  closeUses: () => void;
+
   setFiles: (f: string[]) => void;
   openFile: (path: string, content: string) => void;
   closeTab: (path: string) => void;
@@ -170,6 +177,12 @@ export const useStore = create<VSState>((set) => ({
   setBridge: (bridge) => set({ bridge }),
   settingsOpen: false,
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+
+  // Phase 8 — usages panel state (reqId guards stale responses)
+  uses: null,
+  setUsesLoading: () => set((s) => ({ uses: { loading: true, result: s.uses?.result ?? null, reqId: (s.uses?.reqId ?? 0) + 1 } })),
+  setUses: (result) => set((s) => ({ uses: { loading: false, result, reqId: (s.uses?.reqId ?? 0) + 1 } })),
+  closeUses: () => set({ uses: null }),
   graphOpen: false,
   graphScope: null,
   graphSeed: 0,

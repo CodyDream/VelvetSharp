@@ -102,6 +102,10 @@ export class BrainClient {
   rename(path: string, line: number, col: number, newName: string) {
     return this.call<RenamePlanResult>("rename", { path, line, col, newName });
   }
+  /** Phase 8 — all project references of the symbol at the caret + origin */
+  findUses(path: string, line: number, col: number) {
+    return this.call<SymbolUsesResult>("findUses", { path, line, col });
+  }
   /** files indexed from the startup cache without a parse tree — parse these
    *  before renaming so references inside them are not missed */
   missingTrees() { return this.call<string[]>("missingTrees"); }
@@ -140,6 +144,29 @@ export interface RenamePlanResult {
   newName?: string;
   edits: { path: string; ranges: { line: number; col: number; length: number }[] }[];
   fileRename?: { from: string; to: string; metaFrom?: string; metaTo?: string } | null;
+  warnings: string[];
+}
+
+/** Phase 8 — usages panel payload */
+export interface UseHitDto {
+  file: string;
+  line: number;
+  col: number;
+  length: number;
+  text: string;
+  isDecl: boolean;
+}
+export interface SymbolUsesResult {
+  ok: boolean;
+  reason?: string;
+  name?: string;
+  kind?: string;
+  container?: string;
+  declFile?: string;
+  declLine?: number;
+  declCol?: number;
+  origin?: string;
+  uses: UseHitDto[];
   warnings: string[];
 }
 

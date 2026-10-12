@@ -99,6 +99,8 @@ const handlers: Record<string, (p: any) => any> = {
   depGraph: (p) => engine!.dependencyGraph(p.scope ?? null, !!p.includeExternal),
   renamePrepare: (p) => engine!.renamePrepare(p.path, p.line, p.col),
   rename: (p) => engine!.rename(p.path, p.line, p.col, p.newName ?? ""),
+  // Phase 8 — usages panel (all project references + origin of a symbol)
+  findUses: (p) => engine!.findUses(p.path, p.line, p.col),
   missingTrees: () => engine!.missingTrees(),
   removeFile: (p) => { engine!.removeFile(p.path); return { ok: true }; },
   // v0.7.0 — explorer file-operations sync (drop entries missing from a fresh scan)

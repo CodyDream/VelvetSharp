@@ -682,3 +682,70 @@ button.asm-chip { font: inherit; }
 .statusbar .asm-chip, .statusbar .bridge-chip, .statusbar .err-count {
   padding: 2px 10px; border-radius: 12px; margin: 0 1px;
 }
+
+/* ============ Phase 8 — usages panel ("where is this used / from") ============ */
+.uses-panel {
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+  max-height: 220px;
+  display: flex; flex-direction: column;
+  flex-shrink: 0;
+}
+.uses-header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 5px 12px; cursor: default;
+  background: color-mix(in srgb, var(--bg-panel) 92%, var(--accent) 8%);
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+.uses-glyph { color: var(--accent); font-size: 12px; }
+.uses-title { font-size: 12px; color: var(--text); white-space: nowrap; }
+.uses-title b { color: var(--accent); }
+.uses-count {
+  font-size: 11px; padding: 1px 8px; border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--text); white-space: nowrap;
+}
+.uses-origin {
+  font-size: 11px; color: color-mix(in srgb, var(--text) 62%, transparent);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+}
+.uses-close {
+  margin-left: auto; background: none; border: none; color: var(--text);
+  font-size: 14px; cursor: pointer; padding: 0 4px; opacity: .7;
+}
+.uses-close:hover { opacity: 1; color: var(--accent); }
+.uses-list { overflow-y: auto; }
+.use-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 3px 12px 3px 24px; cursor: pointer; font-size: 12px;
+  border-left: 2px solid transparent;
+}
+.use-row:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); border-left-color: var(--accent); }
+.use-row.is-decl { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.use-kind {
+  font-size: 9.5px; text-transform: uppercase; letter-spacing: .5px;
+  padding: 1px 6px; border-radius: 8px; flex-shrink: 0;
+  background: color-mix(in srgb, var(--text) 12%, transparent);
+  color: color-mix(in srgb, var(--text) 75%, transparent);
+  font-family: Consolas, monospace;
+}
+.use-kind.decl { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--text); }
+.use-text {
+  font-family: 'Cascadia Code', 'JetBrains Mono', Consolas, monospace;
+  font-size: 11.5px; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1;
+}
+.use-file {
+  font-size: 11px; color: color-mix(in srgb, var(--text) 55%, transparent);
+  white-space: nowrap; flex-shrink: 0;
+  font-family: Consolas, monospace;
+}
+.uses-warn {
+  padding: 4px 12px; font-size: 11px;
+  color: color-mix(in srgb, var(--text) 70%, #f0b429 30%);
+  border-top: 1px dashed var(--border);
+}
+
+/* version chip (Phase 7+) — always-visible build identity in the status bar */
+.version-chip { font-weight: 700; letter-spacing: .3px; }

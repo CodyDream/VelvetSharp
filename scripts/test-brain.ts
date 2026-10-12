@@ -766,6 +766,207 @@ async function main() {
   console.log(`\n=========== v0.7.1 RESULT: ${results71.length - failed71.length}/${results71.length} PASS ===========`);
   for (const [name] of failed71) console.log("  FAILED:", name);
   if (failed71.length) process.exitCode = 2;
+
+  // ============================ Phase 8 ============================
+  // 1) dependency graph: nodes are classes/structs/interfaces/enums ONLY (user:
+  //    "don't literally dump every connection... not literally everything") and
+  //    bare VARIABLE names can no longer fake "uses" edges;
+  // 2) completions surface methods declared at the BOTTOM of the file + members
+  //    of other classes/base classes (user: "i wrote a method on bottom of
+  //    thing or another class method let auto complete show them too");
+  // 3) Unity magic methods (Awake/Start/Update) now appear in completions
+  //    (user: "those magic methods... dont show up in auto complete");
+  // 4) findUses: select a symbol → every place it is used + where it comes from
+  //    (user: "shows in window like the error and warning window the places").
+  const results8: [string, boolean][] = [];
+  const check8 = (name: string, ok: boolean) => {
+    results8.push([name, ok]);
+    console.log(`  ${ok ? "PASS" : "FAIL"} — ${name}`);
+  };
+
+  // ---- TEST46: graph node kinds + bare-variable spam guard ----
+  // NB: earlier suites call syncFiles() which drops the demo fixtures from the
+  // index — these tests are fully self-contained temp files.
+  {
+    const g0 = engine.dependencyGraph(null, false);
+    const okKinds = g0.nodes.every((n: any) => ["class", "struct", "interface", "enum"].includes(n.kind));
+    check8("TEST46a every graph node is a class/struct/interface/enum (no delegates, no methods/locals)", okKinds && g0.nodes.length > 0);
+
+    // a variable whose name is the lowercase of a type must NOT create a second edge
+    engine.updateFile("__test__/SpamOwner.cs",
+      "public class SpamTarget\n{\n    public int hp;\n}\n\npublic class SpamOwner\n{\n    private SpamTarget spamTarget;\n    void Go()\n    {\n        if (spamTarget != null) { }\n    }\n}\n", true);
+    const g8 = engine.dependencyGraph(null, false);
+    const byName = new Map(g8.nodes.map((n: any) => [n.name, n] as const));
+    const spam = byName.get("SpamOwner");
+    const eh = byName.get("SpamTarget");
+    const usesEdges = spam && eh
+      ? g8.edges.filter((e: any) => e.from === spam.id && e.to === eh.id && e.kind === "uses").length
+      : -1;
+    check8("TEST46b bare variable 'spamTarget' does not duplicate the uses edge (exact-case guard)", usesEdges === 1);
+
+    // static call through the exact type name IS a real dependency
+    engine.updateFile("__test__/StaticCall.cs",
+      "public class StaticTarget\n{\n    public static StaticTarget Instance;\n}\n\npublic class StaticCaller\n{\n    void Go()\n    {\n        StaticTarget.Instance.ToString();\n    }\n}\n", true);
+    const g9 = engine.dependencyGraph(null, false);
+    const byName9 = new Map(g9.nodes.map((n: any) => [n.name, n] as const));
+    const caller = byName9.get("StaticCaller");
+    const target = byName9.get("StaticTarget");
+    const gmEdge = caller && target ? g9.edges.some((e: any) => e.from === caller.id && e.to === target.id) : false;
+    check8("TEST46c exact-case static reference still yields the dependency edge", gmEdge);
+  }
+
+  // ---- TEST47: bottom-of-file method + other-class members in bare completions ----
+  {
+    engine.updateFile("__test__/BottomProbe.cs",
+      "using UnityEngine;\n\npublic class BottomProbe : MonoBehaviour\n{\n    private void Update()\n    {\n        int hp = 10;\n        He\n    }\n\n    public void HealMe(int amount)\n    {\n        hp += amount;\n    }\n}\n", true);
+    // caret right after "He" on line 7 (0-based), col 10
+    const comps = engine.completions("__test__/BottomProbe.cs", 7, 10);
+    const labels = new Set(comps.map((c: any) => c.label));
+    check8("TEST47a method declared BELOW the caret appears in bare completions (HealMe)", labels.has("HealMe"));
+
+    // inherited member from ANOTHER class (base in a separate file)
+    engine.updateFile("__test__/ProbeBase.cs",
+      "using UnityEngine;\n\npublic class ProbeBase : MonoBehaviour\n{\n    protected int probeCharge = 3;\n    public void ProbeStrike(int dmg) { }\n}\n", true);
+    engine.updateFile("__test__/ProbeDerived.cs",
+      "using UnityEngine;\n\npublic class ProbeDerived : ProbeBase\n{\n    private void Update()\n    {\n        Prob\n    }\n}\n", true);
+    const comps2 = engine.completions("__test__/ProbeDerived.cs", 6, 12);
+    const labels2 = new Set(comps2.map((c: any) => c.label));
+    check8("TEST47c base-class members complete in the derived class (ProbeStrike, probeCharge)", labels2.has("ProbeStrike") && labels2.has("probeCharge"));
+
+    // `this.` on a project type shows the whole family (own + inherited)
+    engine.updateFile("__test__/ThisProbe.cs",
+      "using UnityEngine;\n\npublic class ThisProbe : ProbeBase\n{\n    private void Update()\n    {\n        this.Prob\n    }\n}\n", true);
+    const comps3 = engine.completions("__test__/ThisProbe.cs", 6, 17);
+    const labels3 = new Set(comps3.map((c: any) => c.label));
+    check8("TEST47d this. completion includes base-class members", labels3.has("ProbeStrike"));
+  }
+
+  // ---- TEST48: Unity magic methods now complete (injected onto MonoBehaviour) ----
+  {
+    const mb = engine.unity.findType("MonoBehaviour");
+    const members = mb ? engine.unity.membersOf(mb) : [];
+    const names = new Set(members.map((m: any) => m.name));
+    check8("TEST48a MonoBehaviour carries Awake/Start/Update/FixedUpdate after injection",
+      ["Awake", "Start", "Update", "FixedUpdate"].every((n) => names.has(n)));
+
+    // through a PROJECT subclass via `this.` (the family walk reaches the injected methods)
+    engine.updateFile("__test__/MagicProbe.cs",
+      "using UnityEngine;\n\npublic class MagicProbe : MonoBehaviour\n{\n    private void Update()\n    {\n        this.Fi\n    }\n}\n", true);
+    const comps = engine.completions("__test__/MagicProbe.cs", 6, 14);
+    const labels = new Set(comps.map((c: any) => c.label));
+    check8("TEST48b 'this.' on a MonoBehaviour script completes FixedUpdate (injected magic method)", labels.has("FixedUpdate"));
+    check8("TEST48c injected magic methods carry docs", (() => {
+      const it = comps.find((c: any) => c.label === "FixedUpdate");
+      return !!it && typeof it.detail === "string" && it.detail.includes("FixedUpdate");
+    })());
+  }
+
+  // ---- TEST49: findUses — method refs across files, locals, API origin ----
+  {
+    engine.updateFile("__test__/UsesA.cs",
+      "public class UsesA\n{\n    public int Cheap(int x)\n    {\n        return x + 1;\n    }\n}\n", true);
+    engine.updateFile("__test__/UsesB.cs",
+      "public class UsesB\n{\n    public int Run()\n    {\n        UsesA a = new UsesA();\n        return a.Cheap(3);\n    }\n}\n", true);
+    const uses = engine.findUses("__test__/UsesA.cs", 2, 15); // on "Cheap" declaration
+    check8("TEST49a method uses: declaration + cross-file call found", uses.ok === true && uses.uses.length >= 2
+      && uses.uses.some((u: any) => u.isDecl) && uses.uses.some((u: any) => u.file === "__test__/UsesB.cs"));
+    check8("TEST49b origin names the declaring file and container",
+      typeof uses.origin === "string" && uses.origin.includes("UsesA.Cheap") && uses.origin.includes("__test__/UsesA.cs"));
+
+    // local variable: bounded to the method
+    engine.updateFile("__test__/LocalProbe.cs",
+      "public class LocalProbe\n{\n    public int Run()\n    {\n        int tally = 0;\n        tally += 1;\n        return tally;\n    }\n}\n", true);
+    const lu = engine.findUses("__test__/LocalProbe.cs", 4, 13); // on "tally" declaration
+    check8("TEST49c local variable uses collected inside its method", lu.ok === true && lu.uses.length === 3
+      && lu.uses.every((u: any) => u.file === "__test__/LocalProbe.cs"));
+
+    // compiled API type: panel must say where it comes from
+    engine.updateFile("__test__/ApiProbe.cs",
+      "using UnityEngine;\n\npublic class ApiProbe : MonoBehaviour\n{\n    private void Update()\n    {\n        GameObject go;\n    }\n}\n", true);
+    const au = engine.findUses("__test__/ApiProbe.cs", 6, 10); // on "GameObject"
+    check8("TEST49d API symbol resolves with a compiled-API origin", au.ok === true && typeof au.origin === "string" && au.origin.includes("UnityEngine.GameObject"));
+
+    // type uses: class referenced via type positions
+    const tu = engine.findUses("__test__/UsesA.cs", 0, 13); // on "UsesA" class declaration
+    check8("TEST49e class uses include new/casts/type positions", tu.ok === true && tu.uses.some((u: any) => u.file === "__test__/UsesB.cs"));
+  }
+
+  // ---- TEST50: graph still healthy after temp files (caps + no crash) ----
+  {
+    const g = engine.dependencyGraph(null, false);
+    check8("TEST50 graph rebuilds with temp files under the caps, nodes are types only",
+      g.nodes.length > 0 && g.nodes.length <= 260 && g.nodes.every((n: any) => ["class", "struct", "interface", "enum", "external"].includes(n.kind)));
+  }
+
+  // ---- TEST51: out variable declarations are LEGAL — no false "assignable variable" errors ----
+  // Task 17-a: the ref/out lint used to flag `out int result` / `out var found`
+  // (declaration expressions). Legal forms must produce ZERO such errors while
+  // genuinely wrong args (`out 42`, `out x.y`) keep being flagged.
+  {
+    engine.updateFile("__test__/OutRegression.cs",
+      "using UnityEngine;\n\n" +
+      "public class OutRegression : MonoBehaviour\n" +
+      "{\n" +
+      "    private void Start()\n" +
+      "    {\n" +
+      "        if (int.TryParse(\"42\", out int result))\n" +
+      "        {\n" +
+      "            Debug.Log(result);\n" +
+      "        }\n\n" +
+      "        int seconds;\n" +
+      "        if (int.TryParse(\"7\", out seconds))\n" +
+      "        {\n" +
+      "            Debug.Log(seconds);\n" +
+      "        }\n\n" +
+      "        var d = new System.Collections.Generic.Dictionary<string, int>();\n" +
+      "        if (d.TryGetValue(\"k\", out var found))\n" +
+      "        {\n" +
+      "            Debug.Log(found);\n" +
+      "        }\n\n" +
+      "        int.TryParse(\"1\", out _);\n" +
+      "    }\n\n" +
+      "    private bool TryGet(out int value)\n" +
+      "    {\n" +
+      "        value = 5;\n" +
+      "        return true;\n" +
+      "    }\n" +
+      "}\n", true);
+    const r51 = engine.updateFile("__test__/OutRegression.cs", engine.fileContent("__test__/OutRegression.cs") ?? "", true);
+    const diags51 = (r51.diagnostics ?? []).concat(r51.sem?.diagnostics ?? []);
+    const falsePositives = diags51.filter((d: any) =>
+      d.severity === "error" && /assignable variable/.test(d.message));
+    check8("TEST51a out declarations (out int result / out var found / out seconds / out _) + out-param method → ZERO assignable-variable errors",
+      falsePositives.length === 0 && diags51.length === 0);
+
+    // the lint must keep working on genuinely wrong args (out of a literal and
+    // of an invocation — member chains like `out obj.field` stay LEGAL: fields
+    // are assignable, and inventing warnings there is exactly what the user
+    // forbade)
+    engine.updateFile("__test__/OutWrong.cs",
+      "public class OutWrong\n" +
+      "{\n" +
+      "    private int F() => 1;\n" +
+      "    private void Go()\n" +
+      "    {\n" +
+      "        int v;\n" +
+      "        Foo(out 42);\n" +
+      "        Foo(out F());\n" +
+      "        Foo(out v); // legal\n" +
+      "    }\n" +
+      "    private void Foo(out int v) { v = 0; }\n" +
+      "}\n", true);
+    const r51b = engine.updateFile("__test__/OutWrong.cs", engine.fileContent("__test__/OutWrong.cs") ?? "", true);
+    const diags51b = (r51b.diagnostics ?? []).concat(r51b.sem?.diagnostics ?? []);
+    const kept = diags51b.filter((d: any) =>
+      d.severity === "error" && /assignable variable/.test(d.message));
+    check8("TEST51b genuinely wrong out 42 / out F() still flagged; legal out v untouched", kept.length === 2);
+  }
+
+  // ---- Phase 8 summary ----
+  const failed8 = results8.filter(([, ok]) => !ok);
+  console.log(`\n=========== Phase 8 RESULT: ${results8.length - failed8.length}/${results8.length} PASS ===========`);
+  for (const [name] of failed8) console.log("  FAILED:", name);
+  if (failed8.length) process.exitCode = 2;
 }
 
 main().then(() => process.exit(process.exitCode ?? 0)).catch((e) => { console.error("FATAL", e); process.exit(1); });

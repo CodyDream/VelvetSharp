@@ -28,10 +28,15 @@ export interface DepEngineView {
   };
 }
 
-export const DEP_NODE_CAP = 420;
-const DEP_EDGE_CAP = 1500;   // v0.6.1 — WebView2 dies rendering 10k+ SVG paths
-const EXTERNAL_CAP = 24;
-const OUT_OF_SCOPE_CAP = 64;
+export const DEP_NODE_CAP = 260;   // Phase 8: types-only graphs — 260 type cards is already a wall
+const DEP_EDGE_CAP = 900;          // Phase 8: 1500 raw paths could choke the webview
+const EXTERNAL_CAP = 16;
+const OUT_OF_SCOPE_CAP = 48;
+
+/** Phase 8 (user: "nodes should be either class, interfaces or structs — not
+ *  literally everything"): only real type declarations become nodes. Delegates
+ *  (function-pointer types) are excluded — they are noise in a class graph. */
+const GRAPH_NODE_KINDS = new Set(["class", "struct", "interface", "enum"]);
 
 const PRIMITIVES = new Set([
   "int", "float", "double", "decimal", "bool", "string", "char", "object",
@@ -75,6 +80,11 @@ export function buildDependencyGraph(
     if (!prefix || p.startsWith(prefix)) inScope.push(f);
     else outScope.push(f);
   }
+  // Phase 8 crash fix: `isOutOfScope` used to do a LINEAR scan over every
+  // in-scope file per resolved reference — on a few-hundred-script project that
+  // was billions of comparisons inside the worker (the "graph crashes" report:
+  // the request never returned / the worker died). One Set, O(1) lookups.
+  const inScopePathSet = new Set(inScope.map((f) => normDepPath(f.path)));
 
   /* ---------- project type resolution ---------- */
   // simple lower name → declared types (whole project — needed to resolve refs)
@@ -95,7 +105,7 @@ export function buildDependencyGraph(
   const edgeIndex = new Map<string, RawEdge>();
 
   const addEdge = (fromId: string, toId: string, kind: DepKind, weight = 1) => {
-    if (fromId === toId) return;
+    if (!fromId || !toId || fromId === toId) return;
     const key = `${fromId}|${toId}|${kind}`;
     const existing = edgeIndex.get(key);
     if (existing) existing.weight = Math.min(99, existing.weight + weight);
@@ -106,9 +116,10 @@ export function buildDependencyGraph(
     }
   };
 
-  const isOutOfScope = (t: SymbolInfo): boolean => !inScope.some((ff) => ff.path === t.file);
+  const isOutOfScope = (t: SymbolInfo): boolean => !inScopePathSet.has(normDepPath(t.file));
 
   const ensureProjectNode = (t: SymbolInfo, outOfScope: boolean): string => {
+    if (!GRAPH_NODE_KINDS.has(t.kind)) return ""; // Phase 8: classes/structs/interfaces/enums only
     const id = nodeProjectId(t);
     let n = nodesById.get(id);
     if (!n) {
@@ -149,17 +160,22 @@ export function buildDependencyGraph(
     return id;
   };
 
-  /** resolve a simple type name as declared in / visible from `file` */
+  /** resolve a simple type name as declared in / visible from `file`.
+   *  Phase 8: exact-case match wins (C# identifiers are case-sensitive) — the
+   *  old all-lowercase lookup let a VARIABLE named `enemy` resolve to the TYPE
+   *  `Enemy` and spammed "uses" edges ("don't literally dump every connection"). */
   const resolveProjectType = (simple: string, file: FileSymbols | null): SymbolInfo | null => {
     const cands = bySimple.get(simple.toLowerCase());
     if (!cands?.length) return null;
     if (cands.length === 1) return cands[0];
+    const exact = cands.filter((c) => c.name === simple);
+    const pool = exact.length ? exact : cands;
     // prefer: declared in this file → same namespace → ns imported via using
     const usings = file ? new Set(file.usings.map((u) => u.trim())) : new Set();
     const fileNss = file ? file.namespaces : [];
     let best: SymbolInfo | null = null;
     let bestScore = -1;
-    for (const c of cands) {
+    for (const c of pool) {
       let score = 0;
       if (file && c.file === file.path) score = 4;
       else if (file && c.ns && fileNss.some((n) => n === c.ns || n.startsWith(c.ns + "."))) score = 3;
@@ -177,9 +193,16 @@ export function buildDependencyGraph(
     return view.unity.findType(simple);
   };
 
+  /** Phase 8: type-ish positions + bare identifiers. Bare was briefly dropped,
+   *  but static calls like `GameManager.Instance` ARE real dependencies (the
+   *  v0.6.0 fixtures proved it). The spam guard instead: a bare identifier only
+   *  creates an edge when it matches a declared project type EXACTLY (C# is
+   *  case-sensitive) — a VARIABLE named `enemy` must never hit the TYPE `Enemy. */
   const isTypePositionCtx = (ctx: IdentRef["ctx"]) => ctx === "typePos" || ctx === "attr" || ctx === "ctor" || ctx === "bare";
+  const exactProjectType = (name: string): SymbolInfo | null =>
+    (bySimple.get(name.toLowerCase()) ?? []).find((t) => t.name === name) ?? null;
 
-  /* ---------- in-scope declared types → nodes ---------- */
+  /* ---------- in-scope declared types → nodes (types only) ---------- */
   for (const f of inScope) {
     for (const t of f.types) ensureProjectNode(t, false);
   }
@@ -261,6 +284,7 @@ export function buildDependencyGraph(
 
       for (const nm of names) {
         if (PRIMITIVES.has(nm.toLowerCase())) continue;
+        if (ref.ctx === "bare" && !exactProjectType(nm)) continue; // Phase 8 spam guard (see above)
         const target = resolveProjectType(nm, f);
         if (target) {
           if (target.file === owner.file && target.line === owner.line) continue; // self

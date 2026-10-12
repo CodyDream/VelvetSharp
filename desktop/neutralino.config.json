@@ -2,9 +2,9 @@
   "applicationId": "com.velvetsharp.app",
   "applicationName": "VelvetSharp",
   "author": "VelvetSharp",
-  "description": "VelvetSharp Phase 7 — lightweight Unity C# IDE",
+  "description": "VelvetSharp Phase 8 — lightweight Unity C# IDE",
   "copyright": "Copyright © 2026 VelvetSharp",
-  "version": "7.0.0",
+  "version": "8.0.0",
   "defaultMode": "window",
   "port": 0,
   "documentRoot": "/app/dist/",
@@ -27,7 +27,7 @@
   ],
   "modes": {
     "window": {
-      "title": "VelvetSharp — Phase 7",
+      "title": "VelvetSharp — Phase 8",
       "width": 1400,
       "height": 860,
       "minWidth": 940,
