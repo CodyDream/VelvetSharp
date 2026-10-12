@@ -1,0 +1,20 @@
+{
+  "name": "@velvetsharp/metadata",
+  "version": "0.1.0",
+  "description": "VelvetSharp — read .NET/Unity assembly metadata (ECMA-335) + VS XML docs with zero dependencies. No .NET runtime required.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "extract": "tsx src/cli.ts extract",
+    "inspect": "tsx src/cli.ts inspect"
+  },
+  "dependencies": {
+    "fast-xml-parser": "^5.11.2"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.0"
+  }
+}

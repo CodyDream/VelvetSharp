@@ -1,0 +1,54 @@
+{
+  "applicationId": "com.velvetsharp.app",
+  "applicationName": "VelvetSharp",
+  "author": "VelvetSharp",
+  "description": "VelvetSharp Phase 7 — lightweight Unity C# IDE",
+  "copyright": "Copyright © 2026 VelvetSharp",
+  "version": "7.0.0",
+  "defaultMode": "window",
+  "port": 0,
+  "documentRoot": "/app/dist/",
+  "url": "/",
+  "enableServer": true,
+  "enableNativeAPI": true,
+  "exportAuthInfo": false,
+  "singlePageServe": true,
+  "logging": {
+    "enabled": true,
+    "writeToLogFile": false
+  },
+  "nativeAllowList": [
+    "app.*",
+    "events.*",
+    "filesystem.*",
+    "os.*",
+    "window.*",
+    "clipboard.*"
+  ],
+  "modes": {
+    "window": {
+      "title": "VelvetSharp — Phase 7",
+      "width": 1400,
+      "height": 860,
+      "minWidth": 940,
+      "minHeight": 600,
+      "center": true,
+      "fullScreen": false,
+      "alwaysOnTop": false,
+      "icon": "/app/dist/appIcon.png",
+      "enableInspector": false,
+      "borderless": false,
+      "maximize": false,
+      "hidden": false,
+      "resizable": true,
+      "exitProcessOnClose": true
+    }
+  },
+  "cli": {
+    "binaryName": "VelvetSharp",
+    "resourcesPath": "/app/dist/",
+    "clientLibrary": "/neutralino.js",
+    "binaryVersion": "6.10.0",
+    "clientVersion": "6.10.0"
+  }
+}

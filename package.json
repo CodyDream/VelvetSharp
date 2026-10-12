@@ -1,0 +1,21 @@
+{
+  "name": "velvetsharp",
+  "version": "7.0.0",
+  "description": "VelvetSharp — lightweight Unity C# IDE (Neutralino + custom C# intelligence engine)",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix app run dev",
+    "build": "npm --prefix app run build",
+    "tauri": "npm --prefix app exec tauri --",
+    "test:brain": "tsx scripts/test-brain.ts",
+    "extract:unity": "tsx packages/metadata/src/cli.ts extract",
+    "test": "npm run test:brain && npm run verify:dist",
+    "verify:dist": "node scripts/verify-dist.mjs"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.0"
+  },
+  "dependencies": {
+    "@neutralinojs/neu": "^11.8.0"
+  }
+}
