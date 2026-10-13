@@ -68,7 +68,7 @@ async function main() {
   const lanes = await page.evaluate(() => window.__client?.lanes ?? []);
   check("boot + TWO brain lanes (fast + heavy)", Array.isArray(lanes) && lanes.includes("fast") && lanes.includes("heavy"), String(lanes));
   const chip = await page.evaluate(() => document.querySelector(".version-chip")?.textContent ?? "");
-  check("version chip shows Phase 12", String(chip).includes("Phase 12"), String(chip));
+  check("version chip shows Phase 12+ (historical script — current is 13)", /Phase 1[23]/.test(String(chip)), String(chip));
 
   // 2. the boot already opened PlayerController.cs (loadWorkspace opens the
   //    first script) — assert it instead of clicking (a wrong click would

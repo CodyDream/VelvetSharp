@@ -852,3 +852,43 @@ button.asm-chip { font: inherit; }
   white-space: nowrap;
 }
 .dg-modes { display: flex; gap: 4px; }
+
+/* ---- Phase 13: dynamic boxes, call-order badges, cross-file terminals,
+        copyable graph errors + render-crash containment ---- */
+.dg-node.cross .dg-box { stroke-dasharray: 7 3; fill: rgba(78, 201, 176, 0.05); }
+.dg-node.cross .dg-name { fill: #b7e5da; }
+.lg-cross { color: #7fd4c0; }
+.lg-ord { color: #ffd76e; }
+.dg-ord circle {
+  fill: #2a2a3d;
+  stroke: #ffd76e;
+  stroke-width: 1.1;
+}
+.dg-ord text {
+  fill: #ffd76e;
+  font-size: 9px;
+  font-weight: 700;
+  text-anchor: middle;
+  pointer-events: none;
+}
+.dg-ord.dim { opacity: .12; }
+.dg-ord.hot circle { stroke: #ff7ad9; filter: drop-shadow(0 0 3px rgba(255, 122, 217, .6)); }
+.dgd-ord {
+  color: #ffd76e;
+  font-weight: 700;
+  margin-right: 2px;
+  min-width: 16px;
+  text-align: right;
+}
+.dg-copyerr { margin-top: 10px; }
+.dg-crash { gap: 6px; }
+.dg-crash-title { font-size: 13.5px; font-weight: 600; color: var(--err, #ff6b81); }
+.dg-crash-msg { font-size: 12.5px; }
+.dg-crash-stack {
+  max-width: 720px; max-height: 180px; overflow: auto;
+  font-size: 10.5px; color: var(--muted, #9aa0b4);
+  background: rgba(0, 0, 0, 0.25); border: 1px solid var(--border);
+  border-radius: 6px; padding: 8px 10px; text-align: left; white-space: pre-wrap;
+}
+.dg-crash-actions { display: flex; gap: 8px; margin-top: 2px; }
+.dg-crash-hint { color: var(--muted, #9aa0b4); font-size: 11px; margin-top: 6px; }

@@ -24,10 +24,14 @@
  *  snippet with guarded Awake + OnDestroy cleanup, 8 more Unity
  *  snippets: SingletonPersistent, OnEnableDisable, TryGetComponent,
  *  NullGuard, RequireComponent, EventAction, Cooldown, GizmoSphere) ·
- *  Phase 12 = this build.
+ *  Phase 12 = rock-solid desktop connection + never-miss autocomplete ·
+ *  Phase 13 = this build (call flow shows only custom methods — engine/API
+ *  calls hidden with a counter chip, cross-file custom-method terminals,
+ *  per-caller 1·2·3 call-order badges, boxes sized to fit full names,
+ *  copyable graph errors + render-crash containment).
  *  Every delivery bumps by one.
  */
-export const APP_PHASE = 12;
-export const APP_BUILD = "12.0.0";
+export const APP_PHASE = 13;
+export const APP_BUILD = "13.0.0";
 export const APP_LABEL = `Phase ${APP_PHASE}`;
 export const APP_TITLE = `VelvetSharp — ${APP_LABEL}`;

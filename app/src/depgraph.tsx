@@ -16,11 +16,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "./store";
 import type { BrainClient, DepGraphResult, DepNodeResult, DepEdgeResult, CallFlowResult } from "./brain-client";
+import { CrashBoundary, copyText } from "./crash";
+import { APP_BUILD, APP_LABEL } from "./version";
 
 type LayoutName = "hierarchical" | "vertical" | "organic" | "circular" | "business";
 
 interface Pt { x: number; y: number }
-interface LaidNode { node: DepNodeResult; x: number; y: number } // top-left
+interface LaidNode { node: DepNodeResult; x: number; y: number; w: number } // top-left + box width
 interface LaidEdge { edge: DepEdgeResult; points: Pt[] }
 
 const NODE_W = 158;
@@ -36,50 +38,92 @@ const MAX_RENDER_NODES = 300;
 const MAX_RENDER_EDGES = 1000;
 
 /** Phase 9 — map a per-script call-flow result onto the shared renderer.
- *  method nodes keep their own kind; external terminals get "extcall" (drawn
- *  as a different SHAPE, dashed) — and traversal genuinely ends there because
- *  the engine never emits outgoing edges from external nodes. */
-function flowToGraph(r: CallFlowResult): DepGraphResult & { flowReason?: string } {
-  if (!r.ok) return { scope: r.file, nodes: [], edges: [], truncated: false, totalTypes: 0, flowReason: r.reason };
+ *  Phase 13 — the flow payload contains ONLY custom methods: in-file methods
+ *  (full traversal) + cross:true terminals for methods the script calls in the
+ *  user's OTHER scripts (their `file` points at the DEFINING script, so
+ *  double-click navigates there). Engine/API calls never arrive at all. */
+function flowToGraph(r: CallFlowResult): DepGraphResult & { flowReason?: string; flowStack?: string; hiddenCalls?: number } {
+  if (!r.ok) return { scope: r.file, nodes: [], edges: [], truncated: false, totalTypes: 0, flowReason: r.reason, flowStack: r.errorStack };
   const nodes: DepNodeResult[] = r.nodes.map((n) => ({
     id: n.id,
     name: n.label,
     kind: n.kind === "external" ? "extcall" : "method",
-    file: r.file,
+    file: n.file ?? r.file,   // cross-file nodes carry their DEFINING script
     line: n.line,
     ns: n.container,
     asm: null,
     isMono: false,
-    external: n.kind === "external",
+    external: false,          // Phase 13 — no engine/API nodes exist anymore
     refCount: 0,
     outDeg: 0,
     inDeg: 0,
     ret: n.ret,
     entry: n.entry,
     unityMsg: n.unityMsg,
+    cross: n.cross === true,
   }));
   const edges: DepEdgeResult[] = r.edges.map((e) => ({
     from: e.from,
     to: e.to,
-    kind: e.from === e.to && !e.external ? "self" : e.external ? "extcall" : "call",
+    kind: e.from === e.to ? "self" : "call",
     weight: e.count,
+    order: e.order,
   }));
-  return { scope: r.file, nodes, edges, truncated: r.truncated, totalTypes: Math.max(r.nodes.length, (r.methodCount ?? 0) + (r.extCount ?? 0)) };
+  return {
+    scope: r.file, nodes, edges, truncated: r.truncated,
+    totalTypes: Math.max(r.nodes.length, (r.methodCount ?? 0) + (r.crossCount ?? 0)),
+    hiddenCalls: r.hiddenCalls ?? 0,
+  };
 }
 
 /** Phase 10 — the flow result must survive even a malformed worker payload:
  *  a throw inside the mapper used to hit the bare .catch and render a silent
  *  blank canvas that looked like "the graph crashed". */
-function safeFlowToGraph(r: CallFlowResult): DepGraphResult & { flowReason?: string } {
+function safeFlowToGraph(r: CallFlowResult): DepGraphResult & { flowReason?: string; flowStack?: string; hiddenCalls?: number } {
   try {
     return flowToGraph(r);
   } catch (e: any) {
     return {
       scope: r?.file ?? "", nodes: [], edges: [], truncated: false, totalTypes: 0,
       flowReason: `call flow failed to map: ${String(e?.message ?? e)} — press ⟳ to retry`,
+      flowStack: String(e?.stack ?? ""),
     };
   }
 }
+
+/* ------------------- Phase 13 — dynamic node sizing -------------------
+ *  User: "in that box of call methods actually resize the box dynamically to
+ *  fit the entire name". Every layout asks measureNode() for a per-node width
+ *  instead of the fixed NODE_W, and the renderer draws the FULL name
+ *  (ellipsis only past the 360px sanity cap). The sub-line text lives in ONE
+ *  helper shared by the measurer and the renderer, so a box is always as wide
+ *  as the widest of its two lines. */
+const NAME_CW = 7.8;   // ≈ px/char at .dg-name (12.5px, weight 600)
+const SUB_CW = 5.8;    // ≈ px/char at .dg-sub (9.5px)
+const NODE_MIN_W = 116;
+const NODE_MAX_W = 360;
+
+function subLabelFor(n: DepNodeResult): string {
+  if (n.cross) return `${n.ns ? n.ns + " · " : ""}another script`;
+  if (n.kind === "extcall") return "outside the script — branch ends";
+  if (n.kind === "method") return [(n as any).ret || "", n.ns].filter(Boolean).join(" · ");
+  if (n.external) return n.ns || "external";
+  return [n.asm ?? "", n.file.split("/").pop() ?? ""].filter(Boolean).join(" · ");
+}
+
+function measureNode(n: DepNodeResult): number {
+  const nameW = 30 + n.name.length * NAME_CW + 14;           // glyph zone + name + pad
+  const subW = 12 + subLabelFor(n).length * SUB_CW + 14;
+  return Math.round(Math.min(NODE_MAX_W, Math.max(NODE_MIN_W, nameW, subW)));
+}
+
+/** full name unless the sanity cap clipped the box — then ellipsize to fit */
+function fitName(n: DepNodeResult, w: number): string {
+  const max = Math.max(6, Math.floor((w - 44) / NAME_CW));
+  return n.name.length > max ? n.name.slice(0, max - 1) + "…" : n.name;
+}
+
+const wOf = (n: DepNodeResult | undefined) => (n ? measureNode(n) : NODE_W);
 
 /* --------------------------------- layouts --------------------------------- */
 
@@ -201,7 +245,11 @@ function layoutVertical(nodes: DepNodeResult[], edges: DepEdgeResult[]): { nodes
   for (const n of nodes) if ((inbound.get(n.id) ?? 0) === 0 && !placed.has(n.id)) passFrom(n.id);
   for (const n of nodes) if (!placed.has(n.id)) passFrom(n.id); // disjoint cycles / orphans
 
-  const LEAF_W = NODE_W + GAP_X;
+  // Phase 13 — per-node widths: a subtree is as wide as the widest of its own
+  // box and the packed row of its children's boxes
+  const boxW = new Map<string, number>();
+  for (const n of nodes) boxW.set(n.id, wOf(n));
+  const spanW = (id: string) => (boxW.get(id) ?? NODE_W) + GAP_X;
   const width = new Map<string, number>();
   const kidsOf = (id: string) => (children.get(id) ?? []).filter((c) => parent.get(c) === id);
 
@@ -226,28 +274,29 @@ function layoutVertical(nodes: DepNodeResult[], edges: DepEdgeResult[]): { nodes
     for (let i = local.length - 1; i >= 0; i--) {
       const id = local[i];
       let w = 0;
-      for (const c of kidsOf(id)) w += width.get(c) ?? LEAF_W;
-      width.set(id, Math.max(LEAF_W, w));
+      for (const c of kidsOf(id)) w += width.get(c) ?? spanW(c);
+      width.set(id, Math.max(spanW(id), w));
     }
     // top-down x assignment: parent centered over its children
     const assign = (id: string, cx: number, dep: number) => {
       const node = byId.get(id);
       if (!node) return;
       maxDepth = Math.max(maxDepth, dep);
+      const bw = boxW.get(id) ?? NODE_W;
       center.set(id, { x: cx, y: dep * (NODE_H + GAP_Y) });
-      laid.push({ node, x: cx - NODE_W / 2, y: dep * (NODE_H + GAP_Y) });
+      laid.push({ node, x: cx - bw / 2, y: dep * (NODE_H + GAP_Y), w: bw });
       const kids = kidsOf(id);
       let w = 0;
-      for (const c of kids) w += width.get(c) ?? LEAF_W;
+      for (const c of kids) w += width.get(c) ?? spanW(c);
       let x = cx - w / 2;
       for (const c of kids) {
-        const cw = width.get(c) ?? LEAF_W;
+        const cw = width.get(c) ?? spanW(c);
         assign(c, x + cw / 2, dep + 1);
         x += cw;
       }
     };
-    assign(seedId, rx + (width.get(seedId) ?? LEAF_W) / 2, depth0);
-    rx += (width.get(seedId) ?? LEAF_W) + GAP_X;
+    assign(seedId, rx + (width.get(seedId) ?? spanW(seedId)) / 2, depth0);
+    rx += (width.get(seedId) ?? spanW(seedId)) + GAP_X;
   };
 
   // place every pass tree left-to-right; `placed` order == discovery order
@@ -258,19 +307,20 @@ function layoutVertical(nodes: DepNodeResult[], edges: DepEdgeResult[]): { nodes
   const laidIds = new Set(laid.map((l) => l.node.id));
   for (const n of nodes) {
     if (laidIds.has(n.id)) continue;
-    const cx = rx + LEAF_W / 2;
+    const bw = boxW.get(n.id) ?? NODE_W;
+    const cx = rx + bw / 2;
     center.set(n.id, { x: cx, y: (maxDepth + 1) * (NODE_H + GAP_Y) });
-    laid.push({ node: n, x: cx - NODE_W / 2, y: (maxDepth + 1) * (NODE_H + GAP_Y) });
-    rx += LEAF_W;
+    laid.push({ node: n, x: cx - bw / 2, y: (maxDepth + 1) * (NODE_H + GAP_Y), w: bw });
+    rx += bw + GAP_X;
   }
 
   const outEdges: LaidEdge[] = [];
   for (const e of edges) {
     const s = center.get(e.from), t = center.get(e.to);
     if (!s || !t) continue;
-    if (e.from === e.to) { outEdges.push({ edge: e, points: selfLoopPts(s) }); continue; }
+    if (e.from === e.to) { outEdges.push({ edge: e, points: selfLoopPts(s, boxW.get(e.from) ?? NODE_W) }); continue; }
     if (t.y >= s.y) outEdges.push({ edge: e, points: bezierDown(s, t) });   // down / sideways
-    else outEdges.push({ edge: e, points: elbow(s, t) });                   // back edge — around the side
+    else outEdges.push({ edge: e, points: elbow(s, t, boxW.get(e.from) ?? NODE_W, boxW.get(e.to) ?? NODE_W) }); // back edge — around the side
   }
   return { nodes: laid, edges: outEdges };
 }
@@ -279,17 +329,25 @@ function layoutVertical(nodes: DepNodeResult[], edges: DepEdgeResult[]): { nodes
  *  layout engine somehow fails, so the graph view never blanks the app */
 function layoutGrid(nodes: DepNodeResult[], edges: DepEdgeResult[]): { nodes: LaidNode[]; edges: LaidEdge[] } {
   const cols = Math.max(1, Math.ceil(Math.sqrt(nodes.length)));
+  // Phase 13 — columns widen to the widest box they hold
+  const colW: number[] = new Array(cols).fill(NODE_MIN_W);
+  nodes.forEach((n, i) => { colW[i % cols] = Math.max(colW[i % cols], wOf(n)); });
+  const colX: number[] = [];
+  let runX = 0;
+  for (const w of colW) { colX.push(runX); runX += w + GAP_X; }
   const centers = new Map<string, Pt>();
   const laid: LaidNode[] = nodes.map((n, i) => {
-    const p = { x: (i % cols) * (NODE_W + GAP_X), y: Math.floor(i / cols) * (NODE_H + GAP_Y) };
-    centers.set(n.id, { x: p.x + NODE_W / 2, y: p.y + NODE_H / 2 });
-    return { node: n, ...p };
+    const c = i % cols, r = Math.floor(i / cols);
+    const w = wOf(n);
+    const p = { x: colX[c] + (colW[c] - w) / 2, y: r * (NODE_H + GAP_Y) };
+    centers.set(n.id, { x: p.x + w / 2, y: p.y + NODE_H / 2 });
+    return { node: n, ...p, w };
   });
   const outEdges: LaidEdge[] = [];
   for (const e of edges) {
     const s = centers.get(e.from), t = centers.get(e.to);
     if (!s || !t) continue;
-    outEdges.push({ edge: e, points: e.from === e.to ? selfLoopPts(s) : [s, t] });
+    outEdges.push({ edge: e, points: e.from === e.to ? selfLoopPts(s, wOf(nodes.find((n) => n.id === e.from))) : [s, t] });
   }
   return { nodes: laid, edges: outEdges };
 }
@@ -299,22 +357,26 @@ function layoutHierarchical(nodes: DepNodeResult[], edges: DepEdgeResult[], busi
   const { rows, maxLayer } = layered(nodes, edges);
   const laid: LaidNode[] = [];
   const centers = new Map<string, Pt>();
+  const widths = new Map<string, number>();
   rows.forEach((row, li) => {
     const y = (maxLayer - li) * (NODE_H + GAP_Y); // dependents on top
-    const rowW = row.length * (NODE_W + GAP_X) - GAP_X;
-    const x0 = -rowW / 2;
-    row.forEach((id, i) => {
-      const p = { x: x0 + i * (NODE_W + GAP_X), y };
-      centers.set(id, { x: p.x + NODE_W / 2, y: p.y + NODE_H / 2 });
-      laid.push({ node: byId.get(id)!, ...p });
+    // Phase 13 — the row packs per-node boxes, not a fixed-width grid
+    const rowW = row.reduce((a, id) => a + wOf(byId.get(id)), 0) + Math.max(0, row.length - 1) * GAP_X;
+    let x = -rowW / 2;
+    row.forEach((id) => {
+      const w = wOf(byId.get(id));
+      centers.set(id, { x: x + w / 2, y: y + NODE_H / 2 });
+      widths.set(id, w);
+      laid.push({ node: byId.get(id)!, x, y, w });
+      x += w + GAP_X;
     });
   });
   const outEdges: LaidEdge[] = [];
   for (const e of edges) {
     const s = centers.get(e.from), t = centers.get(e.to);
     if (!s || !t) continue;
-    if (e.from === e.to) { outEdges.push({ edge: e, points: selfLoopPts(s) }); continue; } // Phase 9
-    if (business) outEdges.push({ edge: e, points: elbow(s, t) });
+    if (e.from === e.to) { outEdges.push({ edge: e, points: selfLoopPts(s, widths.get(e.from) ?? NODE_W) }); continue; } // Phase 9
+    if (business) outEdges.push({ edge: e, points: elbow(s, t, widths.get(e.from) ?? NODE_W, widths.get(e.to) ?? NODE_W) });
     else outEdges.push({ edge: e, points: bezierDown(s, t) });
   }
   return { nodes: laid, edges: outEdges };
@@ -327,28 +389,30 @@ function bezierDown(s: Pt, t: Pt): Pt[] {
 }
 
 /** Phase 9: singleton self-loop — a small circular detour above the node
- *  ("static instances … ones that link something to itself"). */
-function selfLoopPts(c: Pt): Pt[] {
+ *  ("static instances … ones that link something to itself"). Phase 13 —
+ *  scaled to the node's own width. */
+function selfLoopPts(c: Pt, w: number): Pt[] {
+  const hw = w / 2;
   return [
-    { x: c.x - 20, y: c.y - NODE_H / 2 },          // leaves the top edge (left of center)
-    { x: c.x - 36, y: c.y - NODE_H / 2 - 20 },
-    { x: c.x,      y: c.y - NODE_H / 2 - 34 },     // apex
-    { x: c.x + 36, y: c.y - NODE_H / 2 - 20 },
-    { x: c.x + 20, y: c.y - NODE_H / 2 },          // re-enters the top edge (arrow down)
+    { x: c.x - Math.min(20, hw * 0.6), y: c.y - NODE_H / 2 },          // leaves the top edge (left of center)
+    { x: c.x - Math.min(36, hw * 0.9), y: c.y - NODE_H / 2 - 20 },
+    { x: c.x,      y: c.y - NODE_H / 2 - 34 },                         // apex
+    { x: c.x + Math.min(36, hw * 0.9), y: c.y - NODE_H / 2 - 20 },
+    { x: c.x + Math.min(20, hw * 0.6), y: c.y - NODE_H / 2 },          // re-enters the top edge (arrow down)
   ];
 }
 
 /** orthogonal business elbow: leave the bottom, cross a channel, enter the top.
- *  Backwards edges route around the side. */
-function elbow(s: Pt, t: Pt): Pt[] {
+ *  Backwards edges route around the side. Phase 13 — box-width aware. */
+function elbow(s: Pt, t: Pt, sw: number, tw: number): Pt[] {
   if (t.y >= s.y + NODE_H) {
     const midY = s.y + (t.y - s.y) / 2;
     if (Math.abs(s.x - t.x) < 4) return [s, { x: s.x, y: t.y - 8 }, t];
     return [s, { x: s.x, y: midY }, { x: t.x, y: midY }, { x: t.x, y: t.y - 8 }, t];
   }
   // backwards / sideways: exit the side, elbow outside both rows
-  const outX = s.x + (s.x <= t.x ? -(NODE_W / 2 + 22) : NODE_W / 2 + 22);
-  const inX = t.x + (s.x <= t.x ? NODE_W / 2 + 22 : -(NODE_W / 2 + 22));
+  const outX = s.x + (s.x <= t.x ? -(sw / 2 + 22) : sw / 2 + 22);
+  const inX = t.x + (s.x <= t.x ? tw / 2 + 22 : -(tw / 2 + 22));
   const midY = t.y >= s.y ? (s.y + t.y) / 2 : s.y - (NODE_H + GAP_Y) / 2;
   return [s, { x: outX, y: s.y }, { x: outX, y: midY }, { x: inX, y: midY }, { x: inX, y: t.y }, t];
 }
@@ -408,13 +472,14 @@ function layoutOrganic(nodes: DepNodeResult[], edges: DepEdgeResult[]): { nodes:
   const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
   const laid: LaidNode[] = nodes.map((nd, i) => ({
     node: nd,
-    x: px[i].x - cx - NODE_W / 2,
+    x: px[i].x - cx - wOf(nd) / 2,
     y: px[i].y - cy - NODE_H / 2,
+    w: wOf(nd),
   }));
-  const centers = new Map(laid.map((l) => [l.node.id, { x: l.x + NODE_W / 2, y: l.y + NODE_H / 2 } as Pt]));
+  const centers = new Map(laid.map((l) => [l.node.id, { x: l.x + l.w / 2, y: l.y + NODE_H / 2 } as Pt]));
   const outEdges: LaidEdge[] = edges
     .filter((e) => centers.has(e.from) && centers.has(e.to))
-    .map((e) => ({ edge: e, points: e.from === e.to ? selfLoopPts(centers.get(e.from)!) : [centers.get(e.from)!, centers.get(e.to)!] }));
+    .map((e) => ({ edge: e, points: e.from === e.to ? selfLoopPts(centers.get(e.from)!, wOf(byId.get(e.from))) : [centers.get(e.from)!, centers.get(e.to)!] }));
   return { nodes: laid, edges: outEdges };
 }
 
@@ -434,21 +499,24 @@ function layoutCircular(nodes: DepNodeResult[], edges: DepEdgeResult[]): { nodes
   // huge-project path linear (part of the graph-crash hardening)
   const ordered = new Set(order);
   for (const n of nodes) if (!ordered.has(n.id)) order.push(n.id);
-  const R = Math.max(230, (order.length * (NODE_W + 18)) / (2 * Math.PI));
+  // Phase 13 — ring circumference sized from the real (per-node) box widths
+  const totalW = order.reduce((a, id) => a + wOf(byId.get(id)) + 18, 0);
+  const R = Math.max(230, totalW / (2 * Math.PI));
   const laid: LaidNode[] = [];
   const centers = new Map<string, Pt>();
   order.forEach((id, i) => {
+    const w = wOf(byId.get(id));
     const a = (i / order.length) * Math.PI * 2 - Math.PI / 2;
     const cxp = Math.cos(a) * R, cyp = Math.sin(a) * R * 0.78; // slight ellipse fits widescreens
-    const p = { x: cxp - NODE_W / 2, y: cyp - NODE_H / 2 };
+    const p = { x: cxp - w / 2, y: cyp - NODE_H / 2 };
     centers.set(id, { x: cxp, y: cyp });
-    laid.push({ node: byId.get(id)!, ...p });
+    laid.push({ node: byId.get(id)!, ...p, w });
   });
   const outEdges: LaidEdge[] = [];
   for (const e of edges) {
     const s = centers.get(e.from), t = centers.get(e.to);
     if (!s || !t) continue;
-    if (e.from === e.to) { outEdges.push({ edge: e, points: selfLoopPts(s) }); continue; } // Phase 9
+    if (e.from === e.to) { outEdges.push({ edge: e, points: selfLoopPts(s, wOf(byId.get(e.from))) }); continue; } // Phase 9
     const mx = (s.x + t.x) / 2, my = (s.y + t.y) / 2;
     const cx2 = mx * 0.35, cy2 = my * 0.35; // bend toward the center
     const steps = 14;
@@ -544,7 +612,7 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
   const seed = useStore((s) => s.graphSeed);
   const mode = useStore((s) => s.graphMode);
   const flowFile = useStore((s) => s.graphFlowFile);
-  const [graph, setGraph] = useState<(DepGraphResult & { flowReason?: string }) | null>(null);
+  const [graph, setGraph] = useState<(DepGraphResult & { flowReason?: string; flowStack?: string; hiddenCalls?: number }) | null>(null);
   const [busy, setBusy] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null); // Phase 10 — failed requests show WHY, not a silent blank
   const [layout, setLayout] = useState<LayoutName>("hierarchical");
@@ -649,7 +717,7 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
     let minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
     for (const l of laid.nodes) {
       minX = Math.min(minX, l.x); minY = Math.min(minY, l.y);
-      maxX = Math.max(maxX, l.x + NODE_W); maxY = Math.max(maxY, l.y + NODE_H);
+      maxX = Math.max(maxX, l.x + l.w); maxY = Math.max(maxY, l.y + NODE_H);
     }
     const w = hostRef.current.clientWidth, h = hostRef.current.clientHeight;
     const pad = 40;
@@ -719,6 +787,47 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
   const usesOf = selected ? (graph?.edges ?? []).filter((e) => e.from === selected) : [];
   const nodeCount = (graph?.nodes ?? []).length;
 
+  // Phase 13 — per-caller call-order badges: every edge of one caller gets its
+  // 1·2·3 badge right under the caller's box, left→right in execution order
+  // (wrapping to more rows when a method calls a lot of things)
+  const orderBadges = useMemo(() => {
+    if (mode !== "flow" || !laid) return [];
+    const laidById = new Map(laid.nodes.map((l) => [l.node.id, l] as const));
+    const groups = new Map<string, { sx: number; sy: number; w: number; items: { order: number; key: string; dim: boolean; hot: boolean }[] }>();
+    for (const le of laid.edges) {
+      if (typeof le.edge.order !== "number" || le.edge.order < 1) continue;
+      const src = laidById.get(le.edge.from);
+      const s = le.points[0];
+      if (!src || !s) continue;
+      let g = groups.get(le.edge.from);
+      if (!g) { g = { sx: s.x, sy: s.y + NODE_H + 8, w: src.w, items: [] }; groups.set(le.edge.from, g); }
+      g.items.push({
+        order: le.edge.order,
+        key: le.edge.from + "→" + le.edge.to,
+        dim: isDimmedEdge(le.edge),
+        hot: !!focusId && (le.edge.from === focusId || le.edge.to === focusId),
+      });
+    }
+    const out: { cx: number; cy: number; order: number; key: string; dim: boolean; hot: boolean }[] = [];
+    for (const g of groups.values()) {
+      g.items.sort((a, b) => a.order - b.order);
+      const perRow = Math.max(4, Math.floor((g.w + 56) / 15));
+      g.items.forEach((it, i) => {
+        const row = Math.floor(i / perRow);
+        const col = i % perRow;
+        const rowCount = Math.min(perRow, g.items.length - row * perRow);
+        out.push({ cx: g.sx - (rowCount - 1) * 7.5 + col * 15, cy: g.sy + row * 15, order: it.order, key: it.key, dim: it.dim, hot: it.hot });
+      });
+    }
+    return out;
+  }, [laid, mode, focusId, filterLower]);
+
+  // Phase 13 (user: "put a error out what is wrong so i can copy paste to you")
+  // — one button that copies version + mode + script + message + full stack
+  const graphErrorReport = useCallback((msg: string) =>
+    `[VelvetSharp graph error]\nversion: ${APP_LABEL} (${APP_BUILD})\nmode: ${mode}\n${mode === "flow" ? `script: ${flowFile ?? "(none)"}` : `scope: ${scope ?? "whole project"}`}\nlayout: ${effLayout}\nerror: ${msg}\n\nstack:\n${graph?.flowStack ?? "(none)"}\n\nua: ${navigator.userAgent}`
+  , [mode, flowFile, scope, effLayout, graph]);
+
   return (
     <div className="depgraph">
       <div className="dg-toolbar">
@@ -782,6 +891,14 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
             top {nodeCount} of {graph?.totalTypes ?? nodeCount} {mode === "flow" ? "methods" : "types"}
           </span>
         )}
+        {mode === "flow" && (graph?.hiddenCalls ?? 0) > 0 && (
+          <span
+            className="dg-warn"
+            title="Engine/API calls (Debug.Log, GetComponent, Mathf…) are NOT drawn — only your own custom methods are. The calls still exist in your code."
+          >
+            {graph?.hiddenCalls} engine/API hidden
+          </span>
+        )}
         <span className="dg-stats">{busy ? "building…" : mode === "flow"
           ? `${nodeCount} nodes · ${graph?.edges.length ?? 0} calls`
           : `${nodeCount} types · ${graph?.edges.length ?? 0} dependencies`}</span>
@@ -798,18 +915,29 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
           <div className="dg-empty">
             <div>graph failed to load — {loadError}</div>
             <div style={{ opacity: 0.7, marginTop: 6 }}>the brain worker may be busy or the file may have changed — press ⟳ to retry</div>
+            <button className="dg-btn dg-copyerr" onClick={() => { void copyText(graphErrorReport(loadError)); useStore.getState().setStatus("graph error copied — paste it into your report"); }}>⧉ copy error</button>
           </div>
         )}
         {!busy && !loadError && !laid?.nodes.length && (
           <div className="dg-empty">
-            {mode === "flow"
-              ? (graph?.flowReason ?? (flowFile
-                  ? "no methods found in this script"
-                  : "no script selected — open a .cs file, then switch to Call Flow"))
-              : "no types in this scope — pick another folder or open the whole project"}
+            <div>
+              {mode === "flow"
+                ? (graph?.flowReason ?? (flowFile
+                    ? "no custom methods found in this script"
+                    : "no script selected — open a .cs file, then switch to Call Flow"))
+                : "no types in this scope — pick another folder or open the whole project"}
+            </div>
+            {mode === "flow" && graph?.flowStack && <pre className="dg-crash-stack">{graph.flowStack}</pre>}
+            {mode === "flow" && graph?.flowReason && (
+              <button className="dg-btn dg-copyerr" onClick={() => { void copyText(graphErrorReport(graph.flowReason!)); useStore.getState().setStatus("graph error copied — paste it into your report"); }}>⧉ copy error</button>
+            )}
           </div>
         )}
         {laid && !!laid.nodes.length && (
+          <CrashBoundary
+            label={mode === "flow" ? "Call Flow" : "Dependency graph"}
+            buildReport={(e) => graphErrorReport(String(e?.message ?? e)) + "\n\nrender stack:\n" + String(e?.stack ?? "")}
+          >
           <svg className="dg-svg" width="100%" height="100%">
             <defs>
               <marker id="arr-extends" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -855,6 +983,7 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
                   + (n.isMono ? " mono" : "") + (sel ? " sel" : "") + (dim ? " dim" : "")
                   + (n.kind === "interface" ? " iface" : "") + (n.singleton ? " singl" : "")
                   + (n.kind === "method" ? " method" : "") + (n.kind === "extcall" ? " extcall" : "")
+                  + (n.cross ? " cross" : "")
                   + (isFlow && (n as any).entry ? " entry" : "");
                 return (
                   <g
@@ -866,35 +995,28 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
                     onClick={(e) => { e.stopPropagation(); setSelected(n.id); }}
                     onDoubleClick={(e) => { e.stopPropagation(); openNodeFile(n); }}
                   >
-                    {/* extcall nodes get a capsule body — a genuinely different SHAPE
-                        (user: "when method call something outside the script just use
-                        different shape and put end to that branch") */}
+                    {/* Phase 13 — every box sizes itself to its own name + sub-line
+                        (user: "resize the box dynamically to fit the entire name");
+                        cross-file methods keep a dashed outline (branch ends there) */}
                     <rect
                       className="dg-box"
-                      x={0} y={0} width={NODE_W} height={NODE_H}
+                      x={0} y={0} width={l.w} height={NODE_H}
+                      data-w={l.w}
                       rx={n.kind === "extcall" ? 21 : effLayout === "business" ? 3 : 8}
                     />
                     <text className="dg-glyph" x={12} y={19}>{KIND_GLYPH[n.kind] ?? "▣"}</text>
-                    <text className="dg-name" x={30} y={19}>{clip(n.name, 16)}</text>
-                    <text className="dg-sub" x={12} y={34}>
-                      {n.kind === "extcall"
-                        ? "outside the script — branch ends"
-                        : n.kind === "method"
-                          ? [(n as any).ret || "", n.ns].filter(Boolean).join(" · ")
-                          : n.external
-                            ? n.ns || "external"
-                            : [n.asm ?? "", n.file.split("/").pop() ?? ""].filter(Boolean).join(" · ")}
-                    </text>
+                    <text className="dg-name" x={30} y={19}>{fitName(n, l.w)}</text>
+                    <text className="dg-sub" x={12} y={34}>{subLabelFor(n)}</text>
                     {(n.inDeg > 0 || n.outDeg > 0) && (
                       <g className="dg-degs">
-                        {n.inDeg > 0 && <text x={NODE_W - 30} y={34}>↓{n.inDeg}</text>}
-                        {n.outDeg > 0 && <text x={NODE_W - 14} y={34}>↑{n.outDeg}</text>}
+                        {n.inDeg > 0 && <text x={l.w - 30} y={34}>↓{n.inDeg}</text>}
+                        {n.outDeg > 0 && <text x={l.w - 14} y={34}>↑{n.outDeg}</text>}
                       </g>
                     )}
                     {n.singleton && (
                       <g className="dg-singleton" title="static singleton">
-                        <circle cx={NODE_W - 10} cy={0} r={7.5} />
-                        <text x={NODE_W - 10} y={3.5}>S</text>
+                        <circle cx={l.w - 10} cy={0} r={7.5} />
+                        <text x={l.w - 10} y={3.5}>S</text>
                       </g>
                     )}
                     {isFlow && (n as any).unityMsg && (
@@ -906,8 +1028,18 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
                   </g>
                 );
               })}
+              {/* Phase 13 — per-caller call-order badges (user: "put side little
+                  number like 1 or 2 or 3 … so user knows these execute in this
+                  order in that sub tree, localized to that inside of method") */}
+              {orderBadges.map((b) => (
+                <g key={b.key} className={"dg-ord" + (b.dim ? " dim" : "") + (b.hot ? " hot" : "")} transform={`translate(${b.cx},${b.cy})`}>
+                  <circle r={7} />
+                  <text y={3}>{b.order}</text>
+                </g>
+              ))}
             </g>
           </svg>
+          </CrashBoundary>
         )}
         {selNode && (
           <div className="dg-details" onMouseDown={(e) => e.stopPropagation()}>
@@ -928,6 +1060,7 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
             {selNode.asm && <div className="dgd-asm">assembly: {selNode.asm}</div>}
             {(selNode as any).ret && <div className="dgd-asm">returns: {(selNode as any).ret}</div>}
             {(selNode as any).unityMsg && <div className="dgd-asm">Unity event function — the engine calls it by name</div>}
+            {(selNode as any).cross && <div className="dgd-asm">custom method from another script — the flow stops here</div>}
             <div className="dgd-list-title">Called by ({usedBy.length})</div>
             <div className="dgd-list">
               {usedBy.length === 0 && <span className="dgd-none">nothing calls this {(selNode as any).unityMsg || mode === "flow" ? "in this script" : "in this scope"}</span>}
@@ -937,11 +1070,12 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
                 </div>
               ))}
             </div>
-            <div className="dgd-list-title">{mode === "flow" ? "Calls" : "Uses"} ({usesOf.length})</div>
+            <div className="dgd-list-title">{mode === "flow" ? "Calls (in execution order)" : "Uses"} ({usesOf.length})</div>
             <div className="dgd-list">
               {usesOf.length === 0 && <span className="dgd-none">nothing in this scope</span>}
               {usesOf.map((e) => (
                 <div key={e.to + e.kind} className={"dgd-item k-" + e.kind} onClick={() => setSelected(e.to)}>
+                  {mode === "flow" && typeof e.order === "number" && e.order > 0 && <span className="dgd-ord" title="call order inside the method body">{e.order}.</span>}
                   <span className="dgd-arrow">{arrowFor(e.kind)}</span>{byId.get(e.to)?.name ?? e.to}
                   {e.weight > 1 && <span className="dgd-w">×{e.weight}</span>}
                 </div>
@@ -952,11 +1086,12 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
         <div className="dg-legend">
           {mode === "flow" ? (
             <>
-              <span className="lg">scope: ONE script — methods and their calls</span>
+              <span className="lg">scope: ONE script — only your custom methods</span>
               <span className="lg lg-call">— calls in-script</span>
-              <span className="lg lg-extcall">⇢ outside the script (terminal)</span>
+              <span className="lg lg-ord">1·2·3 call order inside that method</span>
+              <span className="lg lg-cross">⇢ custom method in another script (terminal)</span>
               <span className="lg lg-self">↺ recursion</span>
-              <span className="lg lg-hint">ƒ method · ⊗ external terminal · U badge = Unity event · entry = nothing calls it in-script</span>
+              <span className="lg lg-hint">ƒ method · dashed box = other script · U badge = Unity event · entry = nothing calls it in-script · engine/API calls are not drawn</span>
             </>
           ) : (
             <>
@@ -976,10 +1111,6 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
 
 function arrowFor(kind: string): string {
   return kind === "extends" ? "▲" : kind === "implements" ? "◇" : kind === "self" ? "↺" : kind === "call" ? "→" : kind === "extcall" ? "⇢" : "→";
-}
-
-function clip(s: string, max: number): string {
-  return s.length > max ? s.slice(0, max - 1) + "…" : s;
 }
 
 export { computeLayout as defaultComputeLayout };

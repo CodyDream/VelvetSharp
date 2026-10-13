@@ -68,8 +68,8 @@ check("config hydration at boot", /hydrateConfigFromDisk/.test(js));
 check("no fragile stock client import", !/@neutralinojs\/lib/.test(js));
 
 // 4c. version system present (bumped every phase — see VERSIONS.md checklist)
-check("version chip (status bar)", /version-chip/.test(js) && js.includes("Phase 12"));
-check("Settings version row (build 12.0.0)", js.includes("12.0.0") && /settings-path/.test(js));
+check("version chip (status bar)", /version-chip/.test(js) && js.includes("Phase 13"));
+check("Settings version row (build 13.0.0)", js.includes("13.0.0") && /settings-path/.test(js));
 check("no stale 0.7.1 branding", !js.includes("v0.7.1 —"));
 
 // 4d. Phase 8 features present
@@ -82,7 +82,6 @@ check("graph nodes are types only (legend)", js.includes("enums only"));
 // 4e. Phase 9 features present
 check("call-flow view mode toggle", /graphMode/.test(js) && js.includes("Call flow"));
 check("callFlow RPC wired", /callFlow/.test(js));
-check("external terminal shape + legend", js.includes("outside the script — branch ends"));
 check("problems right-click copy menu", js.includes("Copy this problem") && js.includes("Copy all problems"));
 check("singleton self-loop legend (graph)", js.includes("static singleton"));
 check("no ambiguous-reference warnings (suppressed)", !/Ambiguous reference:/.test(js));
@@ -113,7 +112,7 @@ check("Unity project version detection (ProjectVersion.txt)", js.includes("Proje
 check("custom scripting defines detection", js.includes("scriptingDefineSymbols"));
 check("collapse commands in palette", js.includes("View: Collapse by Methods") && js.includes("View: Expand All"));
 check("editor context menu capture wiring", js.includes("setEditorCtxMenu"));
-check("Phase 12 version chip", js.includes("Phase 12") && js.includes("12.0.0"));
+check("Phase 13 version chip", js.includes("Phase 13") && js.includes("13.0.0"));
 // 4i. Phase 12 — rock-solid bridge + never-miss completions
 check("two-lane brain (fast + heavy workers)", js.includes("lane crashed: ") && js.includes("simulateCrash") && js.includes("lane is back online"));
 check("lane crash recovery wired (respawn + resync)", js.includes("lane restarted") && js.includes("onRespawn"));
@@ -126,6 +125,15 @@ check("bridge: 25s file IO budget", /25e3|25_000|25000/.test(js));
 // 4h. Phase 11.1 — PR #1 merged: class-aware singleton + extra Unity snippets
 check("class-aware Singleton snippet bundle (PR #1)", js.includes("SingletonPersistent") && js.includes("GizmoSphere") && js.includes("TryGetComponent"));
 check("singleton Awake guard shipped", js.includes("an instance already exists on"));
+
+// 4j. Phase 13 — custom-methods-only call flow + crash-proof graph view
+check("flow shows ONLY custom methods (engine/API calls not drawn)", js.includes("only your custom methods") && js.includes("engine/API calls are not drawn"));
+check("hidden engine/API call chip (toolbar)", js.includes("engine/API hidden") && js.includes("hiddenCalls"));
+check("cross-file custom method terminals (x:: + defining file)", js.includes("x::") && js.includes("custom method from another script") && js.includes("crossCount"));
+check("per-caller call-order badges (1·2·3 localized per method)", js.includes("dg-ord") && js.includes("call order inside the method body"));
+check("dynamic node width (boxes fit the entire name)", js.includes("another script") && js.includes("data-w"));
+check("copyable graph errors (version + mode + script + stack)", js.includes("⧉ copy error") && js.includes("graph error copied — paste it into your report"));
+check("render-crash containment (error boundary keeps the app alive)", js.includes("hit an internal error while rendering") && js.includes("⟳ retry"));
 
 // 5. no stale references to removed APIs
 check("no defineVelvetTheme remnant (theme system replaced it)", !js.includes("defineVelvetTheme"));

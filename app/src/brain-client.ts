@@ -316,8 +316,10 @@ export interface DepNodeResult {
   id: string; name: string; kind: string; file: string; line: number;
   ns: string; asm: string | null; isMono: boolean; external: boolean;
   outOfScope?: boolean; singleton?: boolean; refCount: number; outDeg: number; inDeg: number;
+  cross?: boolean;         // Phase 13 call-flow — custom method declared in ANOTHER script (terminal)
+  ret?: string; entry?: boolean; unityMsg?: boolean;
 }
-export interface DepEdgeResult { from: string; to: string; kind: "extends" | "implements" | "uses" | "self" | "call" | "extcall"; weight: number }
+export interface DepEdgeResult { from: string; to: string; kind: "extends" | "implements" | "uses" | "self" | "call" | "extcall"; weight: number; order?: number }
 export interface DepGraphResult {
   scope: string;
   nodes: DepNodeResult[];
@@ -367,7 +369,11 @@ export interface SymbolUsesResult {
   warnings: string[];
 }
 
-/** Phase 9 — call-flow payload (per-script method graph) */
+/** Phase 9 — call-flow payload (per-script method graph).
+ *  Phase 13 — ONLY custom methods are drawn: engine/API calls are counted in
+ *  hiddenCalls/extCount (toolbar chip), calls into the user's other scripts
+ *  arrive as cross:true terminal nodes carrying the defining file, and every
+ *  edge carries its 1-based call-order rank within the caller's body. */
 export interface FlowNodeDto {
   id: string;
   label: string;
@@ -377,17 +383,22 @@ export interface FlowNodeDto {
   ret: string;
   entry: boolean;
   unityMsg: boolean;
+  cross?: boolean;   // declared in ANOTHER script (terminal node)
+  file?: string;     // defining script (cross nodes)
 }
-export interface FlowEdgeDto { from: string; to: string; count: number; external: boolean }
+export interface FlowEdgeDto { from: string; to: string; count: number; external: boolean; order?: number }
 export interface CallFlowResult {
   ok: boolean;
   reason?: string;
+  errorStack?: string;   // full stack when ok:false is an internal error (copyable in the UI)
   file: string;
   nodes: FlowNodeDto[];
   edges: FlowEdgeDto[];
   truncated: boolean;
   methodCount: number;
   extCount: number;
+  hiddenCalls?: number;  // engine/API call sites not drawn
+  crossCount?: number;   // cross-file custom methods drawn
 }
 
 export interface SemRange { line: number; col: number; endLine: number; endCol: number }

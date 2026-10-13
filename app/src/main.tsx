@@ -2,6 +2,7 @@ import "./index.css";
 import { createRoot } from "react-dom/client";
 import App, { boot } from "./App";
 import { useStore } from "./store";
+import { CrashBoundary } from "./crash";
 import * as monacoProbe from "monaco-editor/editor/editor.main.js";
 (window as any).__probe = { monacoEditor: typeof (monacoProbe as any).editor, monacoLang: typeof (monacoProbe as any).languages, keys: Object.keys(monacoProbe).slice(0, 8) };
 
@@ -48,6 +49,18 @@ if (!(window as any).__monacoBooted) { /* init after module eval */ }
 };
 const __root = createRoot(document.getElementById("root")!);
 (window as any).__rootObj = __root;
-__root.render(<App />);
+// Phase 13 — a render crash anywhere keeps the shell alive + reports itself
+// with a copy button instead of unmounting the whole tree ("the app crashed")
+__root.render(
+  <CrashBoundary
+    label="VelvetSharp"
+    buildReport={(e: any) => `[VelvetSharp fatal error]\n${String(e?.message ?? e)}\n\n${String(e?.stack ?? "(no stack)")}`}
+  >
+    <App />
+  </CrashBoundary>
+);
 (window as any).__renderDone = true;
+// Phase 13 debug surface — lets the E2E drive graph mode / flow file honestly
+// (same spirit as __client / __editor)
+(window as any).__vsStore = useStore;
 boot();

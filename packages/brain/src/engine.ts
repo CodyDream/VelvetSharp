@@ -1420,23 +1420,30 @@ export class VelvetSharpEngine {
   }
 
   /** Phase 9 — per-script call-flow graph: in-file method nodes + in-file call
-   *  edges; anything unresolved becomes an external TERMINAL node (different
-   *  shape in the UI, branch ends there). Phase 10: an internal error lands as
-   *  a readable empty result, never as a dead RPC that leaves the graph view
-   *  spinning (one of the reported "sometimes crashes"). */
+   *  edges. Phase 13 (user: "only include the custom methods, remove the unity
+   *  dll stuff"): engine/API calls are no longer drawn — calls into the user's
+   *  OTHER scripts resolve as cross-file terminal nodes, everything pre-packaged
+   *  is counted in hiddenCalls/extCount for the toolbar chip. Edges carry the
+   *  per-caller call-order rank. Phase 10: an internal error lands as a
+   *  readable empty result with the full stack, never as a dead RPC. */
   callFlow(path: string): CallFlowResult {
     try {
       return buildCallFlow(this, path);
     } catch (e: any) {
+      // Phase 13 — the UI shows this reason AND a copy button, so include the
+      // full stack: the user can paste exactly what went wrong into a report
       return {
         ok: false,
         reason: `internal error: ${String(e?.message ?? e)}`,
+        errorStack: String(e?.stack ?? ""),
         file: path,
         nodes: [],
         edges: [],
         truncated: false,
         methodCount: 0,
         extCount: 0,
+        hiddenCalls: 0,
+        crossCount: 0,
       };
     }
   }

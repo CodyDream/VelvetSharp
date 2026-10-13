@@ -1071,10 +1071,10 @@ async function main() {
       !!edgeOf(bid("BuildPayload"), bid("LogPayload"), false));
     check9("TEST54d in-file call ApplyLoadout → BuildPayload",
       !!edgeOf(bid("ApplyLoadout"), bid("BuildPayload"), false));
-    check9("TEST54e external Debug.Log → terminal node with NO outgoing edges",
-      !!edgeOf(bid("LogPayload"), "ext::debug.log", true) &&
-      flow.edges.every((e: any) => e.from !== "ext::debug.log"));
-    check9("TEST54f external Task.Delay terminal", !!edgeOf(bid("Start"), "ext::task.delay", true));
+    check9("TEST54e engine/API calls are NO LONGER drawn (methods only, Phase 13)",
+      flow.ok === true && flow.nodes.every((n: any) => n.kind === "method"));
+    check9("TEST54f engine/API call sites are counted for the chip instead (hiddenCalls + extCount)",
+      (flow.hiddenCalls ?? 0) > 0 && (flow.extCount ?? 0) > 0);
     check9("TEST54g Awake/Start are entries (nothing calls them in-file), BuildPayload is not",
       nodeOf("Awake")?.entry === true && nodeOf("Start")?.entry === true && nodeOf("BuildPayload")?.entry === false);
   }
@@ -1112,8 +1112,8 @@ async function main() {
     check10("TEST55c edges survive the cap (ranked, not sliced)", bf.edges.length >= 300);
     check10("TEST55d helper methods survive selection (connected core kept)",
       !!bfn("Helper0") && !!bfn("Helper7") && !!bfn("Helper13"));
-    check10("TEST55e both populations present (methods + external terminals)",
-      bf.nodes.some((n: any) => n.kind === "external") && bf.nodes.some((n: any) => n.kind === "method"));
+    check10("TEST55e methods-only graph after Phase 13 (external terminals retired)",
+      bf.ok === true && bf.nodes.every((n: any) => n.kind === "method"));
     check10("TEST55f entry flags computed from SURVIVING edges only",
       bf.nodes.filter((n: any) => n.kind === "method").every((n: any) =>
         n.entry === !bf.edges.some((e: any) => !e.external && e.to === n.id)));
@@ -1468,6 +1468,115 @@ async function main() {
     console.log(`\n=========== Phase 12 RESULT: ${results57.length - failed57.length}/${results57.length} PASS ===========`);
     for (const [name] of failed57) console.log("  FAILED:", name);
     if (failed57.length) process.exitCode = 2;
+  }
+
+  // ---- TEST58: Phase 13 — custom-methods-only flow, cross-file terminals,
+  // per-caller call-order ranks + attribute-argument guard ----
+  {
+    const results13: [string, boolean][] = [];
+    const check13 = (name: string, ok: boolean) => {
+      results13.push([name, !!ok]);
+      console.log(`  ${ok ? "PASS" : "FAIL"} — ${name}`);
+    };
+
+    // -- (a) FlowDemo: no external terminals anymore, hidden counts reported --
+    const flowPath13 = "Assets/Scripts/System/FlowDemo.cs";
+    engine.updateFile(flowPath13, fs.readFileSync(path.join(DEMO, "Assets/Scripts/System/FlowDemo.cs"), "utf8"), true);
+    const f13 = engine.callFlow(flowPath13);
+    const nid13 = (label: string) => f13.nodes.find((n: any) => n.label === label)?.id ?? "?";
+    const edge13 = (from: string, to: string) => f13.edges.find((e: any) => e.from === from && e.to === to);
+    check13("TEST58a flow emits ONLY method nodes (engine/API calls never drawn)",
+      f13.ok === true && f13.nodes.every((n: any) => n.kind === "method"));
+    // FlowDemo hides exactly: Task.Delay, payload.ToString, Array.Empty<int>, Debug.Log
+    check13("TEST58b hidden engine/API calls counted (4 sites · 4 distinct)",
+      f13.hiddenCalls === 4 && f13.extCount === 4);
+    check13("TEST58c call-order rank present on every edge",
+      f13.edges.length > 0 && f13.edges.every((e: any) => typeof e.order === "number" && e.order >= 1));
+    check13("TEST58d Start→BuildPayload is call #1 of Start",
+      edge13(nid13("Start"), nid13("BuildPayload"))?.order === 1);
+
+    // -- (b) multi-call ordering inside ONE method + duplicate sites merge --
+    engine.updateFile("__test58__/Order.cs", `using UnityEngine;
+public class Order13 : MonoBehaviour
+{
+    private void Run()
+    {
+        First();
+        Second();
+        First();
+        Third();
+    }
+    private void First() { Debug.Log("1"); }
+    private void Second() { Debug.Log("2"); }
+    private void Third() { First(); }
+}`, true);
+    const o13 = engine.callFlow("__test58__/Order.cs");
+    const oE = (t: string) => o13.edges.find((e: any) => e.from === "m::Order13::Run" && e.to === `m::Order13::${t}`);
+    check13("TEST58e Run's calls ranked in source order (First=1, Second=2, Third=3)",
+      oE("First")?.order === 1 && oE("Second")?.order === 2 && oE("Third")?.order === 3);
+    check13("TEST58f duplicate call sites merge into one edge (First ×2)",
+      oE("First")?.count === 2);
+
+    // -- (c) attribute arguments are NOT the method below them --
+    engine.updateFile("__test58__/Attr.cs", `using UnityEngine;
+public class Attr13 : MonoBehaviour
+{
+    [ContextMenu(MakeLabel())]
+    private void Run() { Helper(); }
+    private void Helper() { Debug.Log("h"); }
+    public static string MakeLabel() { return "run"; }
+}`, true);
+    const a13 = engine.callFlow("__test58__/Attr.cs");
+    check13("TEST58g attribute-argument call never attributed to the method below it",
+      a13.ok === true && !a13.edges.some((e: any) => e.from === "m::Attr13::Run" && e.to === "m::Attr13::MakeLabel"));
+
+    // -- (d) cross-file custom methods resolve as terminals carrying their file --
+    engine.updateFile("__test58__/GameManager.cs", `using UnityEngine;
+public class GameManager13 : MonoBehaviour
+{
+    public void SpawnEnemy(string kind) { Debug.Log(kind); }
+    public void ResetAll() { SpawnEnemy("goblin"); }
+    public static void Announce(string msg) { Debug.Log(msg); }
+}`, true);
+    engine.updateFile("__test58__/Battle.cs", `using UnityEngine;
+public class Battle13 : MonoBehaviour
+{
+    public GameManager13 manager;
+    private GameManager13 mgr2;
+    private void Start()
+    {
+        GameManager13.Announce("wave starting");
+        manager.SpawnEnemy("orc");
+        mgr2.ResetAll();
+        GetComponent<Rigidbody>();
+        Debug.Log("battle");
+    }
+}`, true);
+    const b13 = engine.callFlow("__test58__/Battle.cs");
+    const bEdge = (to: string) => b13.edges.find((e: any) => e.from === "m::Battle13::Start" && e.to === to);
+    check13("TEST58h qualified cross-file call resolves (GameManager13.Announce)",
+      b13.ok === true && !!bEdge("x::GameManager13::Announce"));
+    check13("TEST58i typed-field receiver cross-file calls resolve (manager.SpawnEnemy / mgr2.ResetAll)",
+      !!bEdge("x::GameManager13::SpawnEnemy") && !!bEdge("x::GameManager13::ResetAll"));
+    const xn13 = b13.nodes.find((n: any) => n.id === "x::GameManager13::SpawnEnemy");
+    check13("TEST58j cross-file terminals carry cross+file+line and end traversal",
+      xn13?.cross === true && /GameManager\.cs$/.test(xn13?.file ?? "") && xn13?.line >= 0 &&
+      b13.edges.every((e: any) => !String(e.from).startsWith("x::")));
+    check13("TEST58k Unity/BCL calls stay hidden even in cross-file scripts (hiddenCalls=2, crossCount=3)",
+      b13.hiddenCalls === 2 && b13.crossCount === 3);
+
+    // -- (e) ranks stay contiguous 1..N per caller across every fixture --
+    const ranksOk = [f13, o13, a13, b13].every((r: any) => {
+      const m = new Map<string, number[]>();
+      for (const e of r.edges) { const arr = m.get(e.from) ?? []; arr.push(e.order); m.set(e.from, arr); }
+      return [...m.values()].every((arr) => [...arr].sort((x, y) => x - y).every((v, i) => v === i + 1));
+    });
+    check13("TEST58l per-caller ranks contiguous 1..N across every fixture", ranksOk);
+
+    const failed13 = results13.filter(([, ok]) => !ok);
+    console.log(`\n=========== Phase 13 RESULT: ${results13.length - failed13.length}/${results13.length} PASS ===========`);
+    for (const [name] of failed13) console.log("  FAILED:", name);
+    if (failed13.length) process.exitCode = 2;
   }
 
   // ---- Phase 9 summary ----
