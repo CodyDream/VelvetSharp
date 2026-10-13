@@ -1703,6 +1703,105 @@ public class Battle13 : MonoBehaviour
     if (failed14.length) process.exitCode = 2;
   }
 
+  // ---- TEST60: Phase 15 — full C#/Unity preprocessor: catalog + symbol completion ----
+  {
+    const results15: [string, boolean][] = [];
+    const check15 = (name: string, ok: boolean) => {
+      results15.push([name, !!ok]);
+      console.log(`  ${ok ? "PASS" : "FAIL"} — ${name}`);
+    };
+    const pre = await import("../packages/brain/src/preproc");
+
+    // -- (a) the directive catalog covers the C# language --
+    const names15 = pre.PP_DIRECTIVES.map((d) => d.name);
+    check15("TEST60a all 13 C# directives cataloged with sig+doc",
+      names15.length === 13
+      && ["if", "elif", "else", "endif", "define", "undef", "region", "endregion", "warning", "error", "line", "pragma", "nullable"].every((n) => names15.includes(n))
+      && pre.PP_DIRECTIVES.every((d) => d.sig && d.doc));
+    check15("TEST60b C/C++ directives are NOT cataloged (Roslyn parity)",
+      !names15.includes("ifdef") && !names15.includes("ifndef") && !names15.includes("include"));
+
+    // -- (b) unknown directives warn with a did-you-mean hint --
+    const scanUnk = pre.scanPreproc("#regiong X\n// ok\n", pre.buildDefineSet([], ""));
+    check15("TEST60c '#regiong' warns and suggests '#region'",
+      scanUnk.diagnostics.some((d) => d.severity === "warning" && /did you mean '#region'\?/.test(d.message)));
+    const scanFoo = pre.scanPreproc("#zork\n", pre.buildDefineSet([], ""));
+    check15("TEST60d totally unknown directive still warns (no bogus suggestion)",
+      scanFoo.diagnostics.some((d) => d.severity === "warning" && /'#zork'/.test(d.message) && !/did you mean/.test(d.message)));
+    const scanOK = pre.scanPreproc('#nullable enable\n#line 10\n#pragma checksum "f" "{guid}" "h"\n', pre.buildDefineSet([], ""));
+    check15("TEST60e #nullable/#line/#pragma checksum are real directives (no warnings)",
+      scanOK.diagnostics.length === 0);
+
+    // -- (c) CS1032: #define after code is an error; header defines are not --
+    const scanLate = pre.scanPreproc("using UnityEngine;\n#define LATE\n", pre.buildDefineSet([], ""));
+    check15("TEST60f #define after code errors (CS1032)",
+      scanLate.diagnostics.some((d) => d.severity === "error" && /CS1032/.test(d.message) && d.line === 1));
+    const scanEarly = pre.scanPreproc("// header comment\n#define EARLY_OK\nusing UnityEngine;\n", pre.buildDefineSet([], ""));
+    check15("TEST60g #define after a comment header is legal",
+      !scanEarly.diagnostics.some((d) => /CS1032/.test(d.message)));
+
+    // -- (d) define occurrences are recorded (even inside inactive branches) --
+    const scanDef = pre.scanPreproc("#define A\n#if MISSING_FLAG\n#define B\n#endif\n#undef A\n", pre.buildDefineSet([], ""));
+    check15("TEST60h scan records #define sites with active flags",
+      scanDef.defines.length === 3
+      && scanDef.defines[0].sym === "A" && scanDef.defines[0].active === true
+      && scanDef.defines[1].sym === "B" && scanDef.defines[1].active === false
+      && scanDef.defines[2].kind === "undef");
+
+    // -- (e) csc.rsp / mcs.rsp define parsing --
+    const rsp = pre.parseRspDefines("-define:CSC_ONE\n/define:CSC_TWO,CSC_THREE\n-nowarn:0169\n# comment\n");
+    check15("TEST60i csc.rsp -define: symbols parsed (multi, comma-separated)",
+      rsp.join(",") === "CSC_ONE,CSC_TWO,CSC_THREE");
+
+    // -- (f) engine-level catalog: sources, priorities, define sites --
+    engine.setProjects([{
+      path: "__test60__/P15.csproj", name: "P15", defines: ["CSPROJ_DEF"],
+      compileFiles: [], unityReferences: [], referenceCount: 0, projectRefs: 0, references: [],
+    }]);
+    engine.setUnityProjectInfo("2022.3.41f1", ["SCRIPTING_DEF"]);
+    engine.updateFile("__test60__/Defines.cs", "#define CODE_DEF\n// catalog source file\npublic class Defines { }\n", false);
+    const cat15 = engine.preprocCatalog();
+    const byName15 = new Map(cat15.map((s) => [s.name, s]));
+    check15("TEST60j catalog lists Unity built-ins + DEBUG",
+      byName15.get("UNITY_EDITOR")?.source === "unity" && byName15.has("DEBUG"));
+    check15("TEST60k catalog lists version symbols from the project version",
+      byName15.get("UNITY_2022_3_OR_NEWER")?.source === "version");
+    check15("TEST60l catalog lists scripting + csproj defines with sources",
+      byName15.get("SCRIPTING_DEF")?.source === "scripting" && byName15.get("CSPROJ_DEF")?.source === "project");
+    const codeDef = byName15.get("CODE_DEF");
+    check15("TEST60m catalog lists in-code #define with its site",
+      codeDef?.source === "code" && codeDef?.definedIn?.[0]?.path === "__test60__/Defines.cs" && codeDef?.definedIn?.[0]?.line === 0);
+
+    // -- (g) catalog refreshes with edits and file removal --
+    engine.updateFile("__test60__/Defines.cs", "#define CODE_DEF\n#define CODE_DEF2\npublic class Defines { }\n", false);
+    check15("TEST60n added #define appears in the catalog after an edit",
+      engine.preprocCatalog().some((s) => s.name === "CODE_DEF2" && s.source === "code"));
+    engine.removeFile("__test60__/Defines.cs");
+    check15("TEST60o removed file's defines leave the catalog",
+      !engine.preprocCatalog().some((s) => s.name === "CODE_DEF2" && s.source === "code"));
+
+    // -- (h) in-code defines participate in #if evaluation (file-local, Roslyn rules) --
+    engine.updateFile("__test60__/LocalIf.cs", [
+      "#define LOCAL_ONLY",
+      "#if LOCAL_ONLY",
+      "public class LocalIf { public int okField; }",
+      "#else",
+      "public class LocalIf { this is not valid c# @@ }",
+      "#endif",
+    ].join("\n"), true);
+    const r60 = engine.updateFile("__test60__/LocalIf.cs", engine.fileContent("__test60__/LocalIf.cs") ?? "", true);
+    check15("TEST60p file-local #define drives branch evaluation (else dimmed, no errors leak)",
+      (r60.sem?.inactive ?? []).length >= 1 && (r60.diagnostics ?? []).every((d: any) => !/@@/.test(d.message)));
+    check15("TEST60q code-defined symbol visible in the live catalog (completion source)",
+      engine.preprocCatalog().some((s) => s.name === "LOCAL_ONLY" && s.source === "code"));
+    engine.removeFile("__test60__/LocalIf.cs");
+
+    const failed15 = results15.filter(([, ok]) => !ok);
+    console.log(`\n=========== Phase 15 RESULT: ${results15.length - failed15.length}/${results15.length} PASS ===========`);
+    for (const [name] of failed15) console.log("  FAILED:", name);
+    if (failed15.length) process.exitCode = 2;
+  }
+
   // ---- Phase 9 summary ----
   const failed8 = results8.filter(([, ok]) => !ok);
   console.log(`\n=========== Phase 8 RESULT: ${results8.length - failed8.length}/${results8.length} PASS ===========`);

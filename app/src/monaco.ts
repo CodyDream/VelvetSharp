@@ -7,6 +7,7 @@ import { CS_MONARCH, CS_LANGUAGE_CONFIG, CSHARP_LANG } from "./cs-monarch";
 import { SEMANTIC_TOKEN_TYPES, SEMANTIC_TOKEN_MODIFIERS } from "@brain/semantic";
 import { computeFoldRanges } from "@brain/folding";
 import { xmlDocForSource } from "@brain/xmldoc";
+import { PP_DIRECTIVES } from "@brain/preproc";
 import type { BrainClient } from "./brain-client";
 import { cacheLookup, cacheStore, newCacheStore } from "./completion-cache";
 import { defineAllThemes, applyTheme, getSavedThemeId, DEFAULT_THEME } from "./themes";
@@ -294,8 +295,18 @@ export function registerProviders(client: BrainClient) {
     // word and popped the widget with the whole universe (a "not consistent"
     // complaint); quickSuggestions handles typing naturally.
     // Phase 11: "/" triggers the /// XML documentation skeleton.
-    triggerCharacters: [".", "[", "@", "(", "/"],
-    async provideCompletionItems(model, position) {
+    // Phase 15: "#" starts directive completion and " " pops the symbol list
+    // inside #if/#define argument zones — EVERYWHERE ELSE a space fires the
+    // provider only to answer empty, so the Phase 10 universe-pop stays dead.
+    triggerCharacters: [".", "[", "@", "(", "/", "#", " "],
+    async provideCompletionItems(model, position, context: any) {
+      const spaceFired = context?.triggerCharacter === " "
+        && context?.triggerKind === monaco.languages.CompletionTriggerKind.TriggerCharacter;
+      try {
+        const pp = await preprocSuggestions(model, position, activeClient ?? ((window as any).__client as BrainClient | null));
+        if (pp) return { suggestions: pp };
+      } catch { /* preproc hiccup must never break the normal path */ }
+      if (spaceFired) return { suggestions: [] };
       try {
         return await provideCompletionImpl(model, position);
       } catch {
@@ -316,6 +327,12 @@ export function registerProviders(client: BrainClient) {
 
   monaco.languages.registerHoverProvider(CSHARP_LANG, {
     async provideHover(model, position) {
+      // Phase 15 — hovering a directive name or symbol on a # line explains it
+      // (usage signature / define source + sites) without the brain round-trip
+      try {
+        const pp = await ppHover(model, position, activeClient ?? ((window as any).__client as BrainClient | null));
+        if (pp) return pp;
+      } catch { /* fall through to the normal hover */ }
       let h: any;
       try {
         h = await client.hover(pathOf(model), position.lineNumber - 1, position.column - 1);
@@ -474,6 +491,239 @@ function docCommentSuggestion(model: any, position: any): { suggestions: monaco.
   } catch {
     return null;
   }
+}
+
+/* ---------------- Phase 15 — preprocessor completions + hover ----------------
+ *  Typing `#` completes every C# directive (plus self-closing snippets for
+ *  #if/#region); after `#if ` / `#elif ` / `#define ` / `#undef ` the widget
+ *  offers the FULL symbol world — Unity built-ins, the UNITY_x_y_OR_NEWER
+ *  chain, csproj DefineConstants, scriptingDefineSymbols, csc.rsp defines and
+ *  every `#define` found in project code, each labelled with WHERE it comes
+ *  from. `#pragma`/`#nullable`/`#line` complete their keywords. Hovering a
+ *  symbol (or a directive name) inside a directive line explains it inline.
+ *  The symbol catalog is one small fast-lane RPC cached for 2.5 s. */
+interface PPDefInfoDto { name: string; source: string; detail: string; definedIn: { path: string; line: number }[] }
+/** monaco.* namespace types do not resolve in type positions in this file
+ *  (pre-existing TS2503 class, the proxy is typed `any`) — local alias */
+type MonacoCompletionItem = any;
+
+const PP_CATALOG_TTL_MS = 2500;
+let ppCatalogCache: { at: number; symbols: PPDefInfoDto[] } | null = null;
+
+async function ppSymbols(client: BrainClient | null): Promise<PPDefInfoDto[]> {
+  if (ppCatalogCache && Date.now() - ppCatalogCache.at < PP_CATALOG_TTL_MS) return ppCatalogCache.symbols;
+  if (!client) return ppCatalogCache?.symbols ?? [];
+  try {
+    const res = await client.preprocCatalog();
+    const symbols = Array.isArray(res?.symbols) ? res.symbols : [];
+    ppCatalogCache = { at: Date.now(), symbols };
+    return symbols;
+  } catch {
+    return ppCatalogCache?.symbols ?? [];
+  }
+}
+
+const PP_SOURCE_LABELS: Record<string, string> = {
+  code: "defined in code",
+  scripting: "Player Settings · Scripting Define Symbols",
+  project: "csproj · DefineConstants",
+  version: "Unity version symbol",
+  unity: "Unity built-in",
+};
+
+function ppSymbolMd(s: PPDefInfoDto): string {
+  const parts: string[] = [`**${s.name}** — ${s.detail}`];
+  const sites = s.definedIn ?? [];
+  if (sites.length) {
+    parts.push("", "Defined in:");
+    for (const d of sites.slice(0, 4)) parts.push(`- \`${d.path}\` (line ${d.line + 1})`);
+    if (sites.length > 4) parts.push(`- …and ${sites.length - 4} more`);
+  }
+  return parts.join("\n");
+}
+
+type PPContext =
+  | { type: "directive"; typed: string; hashCol: number }   // typing the directive word itself
+  | { type: "symbol"; typed: string }                       // argument zone of #if/#elif/#define/#undef
+  | { type: "arg"; directive: string; arg: string };        // keyword zone of #pragma/#nullable/#line
+
+/** classify the caret's position inside a preprocessor directive line, or
+ *  null when the caret is not in a completable preprocessor context. The `#`
+ *  must be the first non-whitespace character of the line (C# rules). */
+function preprocContext(model: any, position: any): PPContext | null {
+  try {
+    const lineText: string = model.getLineContent(position.lineNumber) ?? "";
+    const before = lineText.slice(0, position.column - 1);
+    const hash = before.search(/#/);
+    if (hash < 0) return null;
+    if (before.slice(0, hash).trim() !== "") return null; // # inside code/string — not a directive
+    const afterHash = before.slice(hash + 1);
+    // only directive-ish characters may sit between the # and the caret
+    if (/[^A-Za-z0-9_\s!()&|=]/.test(afterHash)) return null;
+    const m = /^(\w*)(?:\s+(.*))?$/.exec(afterHash);
+    if (!m) return null;
+    const word = (m[1] ?? "").toLowerCase();
+    const arg = m[2] ?? "";
+    const caretAfterWord = arg === "" && before.length === hash + 1 + word.length;
+    if (!word || caretAfterWord) {
+      return { type: "directive", typed: m[1] ?? "", hashCol: hash + 1 };
+    }
+    if (word === "if" || word === "elif" || word === "define" || word === "undef") {
+      return { type: "symbol", typed: /[A-Za-z_]\w*$/.exec(arg)?.[0] ?? "" };
+    }
+    if (word === "pragma" || word === "nullable" || word === "line") {
+      return { type: "arg", directive: word, arg: arg.trim() };
+    }
+    return null; // #region/#error/#warning/#else… — freeform, no completion
+  } catch { return null; }
+}
+
+/** the completion widget for any preprocessor context (null = not a directive
+ *  line — the caller falls through to the normal completion path) */
+async function preprocSuggestions(model: any, position: any, client: BrainClient | null): Promise<MonacoCompletionItem[] | null> {
+  const ctx = preprocContext(model, position);
+  if (!ctx) return null;
+  const lineNo: number = position.lineNumber;
+
+  if (ctx.type === "directive") {
+    const word = model.getWordUntilPosition(position);
+    const range = new monaco.Range(lineNo, ctx.hashCol, lineNo, Math.max(ctx.hashCol, word.endColumn ?? ctx.hashCol));
+    const items: MonacoCompletionItem[] = [];
+    for (const d of PP_DIRECTIVES) {
+      items.push({
+        label: "#" + d.name,
+        kind: monaco.languages.CompletionItemKind.Keyword,
+        detail: d.sig,
+        documentation: { value: d.doc },
+        insertText: "#" + d.name,
+        range,
+        sortText: "02" + d.name,
+        filterText: "#" + d.name,
+      });
+    }
+    // self-closing snippets — the pairs everyone types manually today
+    const snippets: [string, string, string][] = [
+      ["#if … #endif", "#if ${1:UNITY_EDITOR}\n$0\n#endif", "conditional block with both ends"],
+      ["#if UNITY_EDITOR … #endif", "#if UNITY_EDITOR\n$0\n#endif", "editor-only code (Unity define)"],
+      ["#region … #endregion", "#region ${1:Name}\n$0\n#endregion", "collapsible region"],
+      ["#pragma warning disable", "#pragma warning disable ${1:CS0168}", "suppress a compiler warning"],
+    ];
+    for (const [label, insert, detail] of snippets) {
+      items.push({
+        label,
+        kind: monaco.languages.CompletionItemKind.Snippet,
+        detail,
+        insertText: convertEol(insert, eolOfMonaco(model)),
+        insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+        range,
+        sortText: "01" + label,
+        filterText: label,
+      });
+    }
+    return items;
+  }
+
+  if (ctx.type === "symbol") {
+    const symbols = await ppSymbols(client);
+    const word = model.getWordUntilPosition(position);
+    const range = new monaco.Range(lineNo, word.startColumn, lineNo, word.endColumn);
+    const SRC_SORT: Record<string, string> = { code: "0", scripting: "1", project: "2", version: "3", unity: "4" };
+    return symbols.map((s) => ({
+      label: s.name,
+      kind: monaco.languages.CompletionItemKind.EnumMember,
+      detail: PP_SOURCE_LABELS[s.source] ?? s.detail,
+      documentation: { value: ppSymbolMd(s) },
+      insertText: s.name,
+      range,
+      sortText: (SRC_SORT[s.source] ?? "5") + s.name.toLowerCase(),
+      filterText: s.name,
+    }));
+  }
+
+  // ---- keyword arguments of #pragma / #nullable / #line ----
+  const word = model.getWordUntilPosition(position);
+  const range = new monaco.Range(lineNo, word.startColumn, lineNo, word.endColumn);
+  const mk = (label: string, detail: string): MonacoCompletionItem => ({
+    label,
+    kind: monaco.languages.CompletionItemKind.Keyword,
+    detail,
+    insertText: label,
+    range,
+    sortText: "01" + label,
+  });
+  if (ctx.directive === "pragma") {
+    if (!ctx.arg) return [mk("warning", "#pragma warning disable/restore — suppress or re-enable warnings")];
+    const wm = /^warning(\s+(.*))?$/i.exec(ctx.arg);
+    if (wm) {
+      const rest = (wm[2] ?? "").trim().toLowerCase();
+      if (/^(disable|restore)\s*$/.test(rest) || /^[a-z]+$/i.test(rest)) {
+        // partial "dis…" still returns both — Monaco filters by the typed word
+        return [
+          mk("disable", "suppress matching warnings from here on"),
+          mk("restore", "re-enable matching warnings from here on"),
+        ];
+      }
+      if (/^(disable|restore)\s+.*$/i.test(ctx.arg)) {
+        return [
+          mk("CS0168", "variable declared but never used"),
+          mk("CS0219", "variable assigned but its value never used"),
+          mk("CS0414", "field assigned but its value never used"),
+          mk("CS0649", "field never assigned to, always default"),
+          mk("CS4014", "task not awaited — the call may never run"),
+          mk("CS0108", "member hides an inherited member — use new"),
+        ];
+      }
+    }
+    return [];
+  }
+  if (ctx.directive === "nullable") {
+    const forms = ["enable", "disable", "restore", "enable warnings", "enable annotations", "disable warnings", "disable annotations", "restore warnings", "restore annotations"];
+    const typed = ctx.arg.toLowerCase();
+    return forms.filter((f) => !typed || f.startsWith(typed)).map((f) => mk(f, "nullable analysis context (C# 8+)"));
+  }
+  if (ctx.directive === "line") {
+    return [mk("default", "restore the real line numbers"), mk("hidden", "hide the following lines from stepper")];
+  }
+  return [];
+}
+
+/** hover for a directive line: directive names get their usage, symbols get
+ *  their SOURCE (Unity built-in / version chain / csproj / Player Settings /
+ *  the exact #define sites in code). Returns null → normal hover path. */
+async function ppHover(model: any, position: any, client: BrainClient | null): Promise<any | null> {
+  const lineText: string = model.getLineContent(position.lineNumber) ?? "";
+  if (!/^\s*#/.test(lineText)) return null;
+  // the caret/mouse can sit MID-identifier (e.g. on the underscore of
+  // E2E_CUSTOM) — getWordUntilPosition would only see the half BEFORE it, so
+  // reconstruct the whole identifier from both sides of the caret
+  const idx: number = Math.min(position.column - 1, lineText.length); // 0-based
+  const before = /[A-Za-z_]\w*$/.exec(lineText.slice(0, idx))?.[0] ?? "";
+  const after = /^\w+/.exec(lineText.slice(idx))?.[0] ?? "";
+  const word = before + after;
+  if (!word || !/^[A-Za-z_]\w*$/.test(word)) return null;
+  const startCol = idx - before.length + 1;
+  const endCol = startCol + word.length;
+  const range = new monaco.Range(position.lineNumber, startCol, position.lineNumber, endCol);
+  const dir = PP_DIRECTIVES.find((d) => d.name === word.toLowerCase());
+  if (dir) {
+    return {
+      range,
+      contents: [
+        { value: "```csharp\n" + dir.sig + "\n```" },
+        { value: dir.doc },
+      ],
+    };
+  }
+  const symbols = await ppSymbols(client);
+  const s = symbols.find((x) => x.name === word);
+  if (!s) return null;
+  return {
+    range,
+    contents: [
+      { value: "```csharp\n#if " + s.name + "\n```" },
+      { value: ppSymbolMd(s) },
+    ],
+  };
 }
 
 /** a completion item as the brain (and the local fast path) emit it */

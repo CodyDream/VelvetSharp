@@ -51,6 +51,7 @@ const LANE_TIMEOUT_RESPAWN = 2;
 const FAST_METHODS = new Set([
   "completions", "hover", "signatureHelp", "definitions",
   "outline", "documentSymbols", "workspaceSymbols", "search", "searchProject",
+  "preprocCatalog",
 ]);
 /** state-changing calls that BOTH lanes must see (engine state mirroring) */
 const MIRROR_METHODS = new Set([
@@ -270,6 +271,9 @@ export class BrainClient {
   sweepChunk(paths: string[]) { return this.call<{ results: SweepResult[] }>("sweepChunk", { paths }); }
   completions(path: string, line: number, col: number) { return this.call<any[]>("completions", { path, line, col }); }
   hover(path: string, line: number, col: number) { return this.call<any>("hover", { path, line, col }); }
+  /** Phase 15 — preprocessor symbol catalog: Unity built-ins, version chain,
+   *  csproj/scripting defines and in-code #define sites (fast lane — small, cached client-side) */
+  preprocCatalog() { return this.call<{ symbols: any[] }>("preprocCatalog", {}); }
   signatureHelp(path: string, line: number, col: number) { return this.call<any>("signatureHelp", { path, line, col }); }
   definitions(path: string, line: number, col: number) { return this.call<any>("definitions", { path, line, col }); }
   outline(path: string) { return this.call<any[]>("outline", { path }); }

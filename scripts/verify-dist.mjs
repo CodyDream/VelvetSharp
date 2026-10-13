@@ -154,6 +154,17 @@ check("MCP: stdio server shipped (mcp/server.mjs)", fs.existsSync(path.join(ROOT
 check("MCP: agent setup guide shipped (mcp/README.md)", fs.existsSync(path.join(ROOT, "mcp", "README.md")) && fs.readFileSync(path.join(ROOT, "mcp", "README.md"), "utf8").includes("claude_desktop_config.json"));
 check("MCP: release pipeline packs mcp/ into the portable zip", fs.readFileSync(path.join(ROOT, ".github/workflows/release.yml"), "utf8").includes("mcp/server.mjs"));
 
+// 4l. Phase 15 — full C#/Unity preprocessor: directive + symbol completion
+check("preproc: catalog RPC wired (worker + client)", /preprocCatalog/.test(js));
+check("preproc: # triggers directive completion", /[`"']#[`"'],\s*[`"'] [`"']/.test(js) && js.includes("did you mean"));
+check("preproc: self-closing #if/#region snippets", /\\?\$\{1:UNITY_EDITOR\}/.test(js) && /\\?\$\{1:Name\}/.test(js));
+check("preproc: symbol completion lists Unity built-ins with sources", js.includes("Unity built-in") && js.includes("Scripting Define Symbols"));
+check("preproc: #pragma/#nullable/#line keyword arguments", js.includes("CS0168") && js.includes("nullable analysis context"));
+check("preproc: unknown-directive diagnostic hint", js.includes("Unknown preprocessor directive"));
+check("preproc: CS1032 define-after-code guard", js.includes("after the first token of the file"));
+check("preproc: csc.rsp / mcs.rsp defines scanned", /csc|mcs.*rsp/.test(js) && js.includes("define:"));
+check("preproc: hover explains directive symbols", js.includes("#if ") && /ppSymbolMd|Defined in:/.test(js));
+
 // 5. no stale references to removed APIs
 check("no defineVelvetTheme remnant (theme system replaced it)", !js.includes("defineVelvetTheme"));
 

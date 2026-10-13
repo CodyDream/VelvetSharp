@@ -8,6 +8,7 @@ import { BrainClient, type UpdateFileResult, type SemanticReport, type RenamePla
 import { DepGraphView } from "./depgraph";
 import { parseCsproj } from "@brain/csproj";
 import { parseAsmdef, guidFromMeta } from "@brain/asmdef";
+import { parseRspDefines } from "@brain/preproc";
 import { computeFoldRanges } from "@brain/folding";
 import { readCache, writeCache, statFiles, fingerprintChanged, cacheEnabled, CACHE_VERSION } from "./projectCache";
 import { UNITY_LIFECYCLE, UNITY_MESSAGE_NAMES } from "@brain/snippets";
@@ -231,6 +232,7 @@ async function loadWorkspace(client: BrainClient) {
     // Phase 11 — read the Unity project identity so #if sees the right world:
     //   ProjectSettings/ProjectVersion.txt → UNITY_<major>_<minor>_OR_NEWER chain
     //   ProjectSettings.asset              → scriptingDefineSymbols custom defines
+    //   Assets/csc.rsp + Assets/mcs.rsp    → -define: compiler flags (Phase 15)
     let unityVersion = "";
     const projectDefines: string[] = [];
     const settingsDir = files.find((f) => /^projectsettings\//i.test(f));
@@ -246,10 +248,18 @@ async function loadWorkspace(client: BrainClient) {
         if (m) for (const d of m[1].split(";")) { const t = d.trim(); if (t) projectDefines.push(t); }
       } catch { /* no ProjectSettings.asset — csproj defines only */ }
     }
-    const res = await client.configureProjects(csprojInfos, asmdefs, { version: unityVersion, defines: projectDefines });
+    // Phase 15 — Unity's official compiler-flag hooks: defines in Assets/csc.rsp
+    // or Assets/mcs.rsp participate in #if evaluation AND the symbol catalog
+    for (const rsp of files.filter((f) => /^assets\/(csc|mcs)\.rsp$/i.test(f))) {
+      try {
+        for (const d of parseRspDefines(await adapter.read(rsp))) projectDefines.push(d);
+      } catch { /* unreadable rsp — skip */ }
+    }
+    const projectDefinesUnique = [...new Set(projectDefines.map((d) => d.trim()).filter(Boolean))];
+    const res = await client.configureProjects(csprojInfos, asmdefs, { version: unityVersion, defines: projectDefinesUnique });
     // Phase 12 — remembered so a lane-respawn resync can re-apply the exact
     // same project config without re-parsing csproj/asmdef files
-    lastProjectConfig = { csprojInfos, asmdefs, unity: { version: unityVersion, defines: projectDefines } };
+    lastProjectConfig = { csprojInfos, asmdefs, unity: { version: unityVersion, defines: projectDefinesUnique } };
     useStore.getState().setProjects(res.projects, res.defines ?? []);
     if (res.asmdef) {
       useStore.getState().setAsmdefInfo(
@@ -264,7 +274,7 @@ async function loadWorkspace(client: BrainClient) {
       parts.push(`${asmdefs.length} asmdef${asmdefs.length > 1 ? "s" : ""} hunted${res.asmdef?.unresolved ? ` · ${res.asmdef.unresolved} unresolved GUID ref${res.asmdef.unresolved > 1 ? "s" : ""}` : ""}`);
     }
     if (unityVersion) parts.push(`Unity ${unityVersion.split(".").slice(0, 2).join(".")} defines`);
-    if (projectDefines.length) parts.push(`+${projectDefines.length} custom define${projectDefines.length > 1 ? "s" : ""}`);
+    if (projectDefinesUnique.length) parts.push(`+${projectDefinesUnique.length} custom define${projectDefinesUnique.length > 1 ? "s" : ""}`);
     useStore.getState().setStatus(parts.join(" · "));
   }
 

@@ -1,11 +1,11 @@
 ════════════════════════════════════════════════════════════════════
-  VelvetSharp — PHASE 14  ·  portable build (build 14.0.0)
+  VelvetSharp — PHASE 15  ·  portable build (build 15.0.0)
 ════════════════════════════════════════════════════════════════════
 
 VERSION SYSTEM
 ──────────────
 The version is the PHASE number — it bumps by exactly one on every
-delivered update and is never reused. This is Phase 14. The phase is
+delivered update and is never reused. This is Phase 15. The phase is
 always visible in the status bar (bottom right) and in ⚙ Settings.
 
 QUICK START (portable — nothing installs)
@@ -15,6 +15,27 @@ QUICK START (portable — nothing installs)
    chip in the status bar or the welcome button to pick your project.
 3. First open asks for a COLOR THEME — it is remembered from then on.
 
+WHAT'S NEW IN PHASE 15 — FULL C# + UNITY PREPROCESSOR + SYMBOL AUTOCOMPLETE
+───────────────────────────────────────────────────────────────────────────
+▲ TYPE `#` AT THE START OF A LINE — every real C# directive completes
+  with its usage + docs: #if #elif #else #endif #define #undef #region
+  #endregion #warning #error #line #pragma #nullable. Self-closing
+  snippets too: "#if … #endif" inserts BOTH ends for you.
+▲ TYPE `#if ` (or #elif / #define / #undef + space) — the FULL symbol
+  world completes, each entry labelled with where it comes from:
+  • Unity built-ins (UNITY_EDITOR, UNITY_STANDALONE_WIN, ENABLE_*…)
+  • UNITY_2022_3_OR_NEWER-style version symbols from your project
+  • csproj DefineConstants + Player Settings scriptingDefineSymbols
+  • Assets/csc.rsp / Assets/mcs.rsp -define: flags (new: scanned!)
+  • EVERY `#define` in your own code — with file + line of each site
+▲ HOVER any symbol inside a #if line → where it is defined.
+  Hover #if / #region … → the directive's usage signature.
+▲ #pragma warning → disable/restore → common CS codes with
+  descriptions. #nullable → enable/disable/restore (+ warnings /
+  annotations forms). #line → default/hidden.
+▲ TYPO PROTECTION: an unknown directive warns with a hint — "#regiong"
+  suggests #region; "#ifdef" suggests #if (C# has no #ifdef!). A
+  #define placed after real code errors CS1032 with a fix hint.
 WHAT'S NEW IN PHASE 14 — REAL FIND-IN-FILES + AI AGENTS (MCP)
 ─────────────────────────────────────────────────────────────
 ▲ FIND IN PROJECT FILES (Ctrl+Shift+F) — now worth using

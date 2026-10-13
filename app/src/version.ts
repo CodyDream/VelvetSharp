@@ -26,7 +26,19 @@
  *  NullGuard, RequireComponent, EventAction, Cooldown, GizmoSphere) ·
  *  Phase 12 = rock-solid desktop connection + never-miss autocomplete ·
  *  Phase 13 = call flow shows only custom methods + order badges + copyable
- *  graph errors · Phase 14 = this build (real find-in-files: live debounced
+ *  graph errors · Phase 14 = real find-in-files + MCP for AI agents ·
+ *  Phase 15 = this build (FULL C# + Unity preprocessor support: typing `#`
+ *  completes all 13 real C# directives with docs and self-closing snippets,
+ *  `#if `/`#elif `/`#define `/`#undef ` complete the whole symbol world —
+ *  Unity built-ins, the UNITY_<maj>_<min>_OR_NEWER chain from
+ *  ProjectVersion.txt, csproj DefineConstants, Player Settings
+ *  scriptingDefineSymbols, Assets/csc.rsp+mcs.rsp -define: flags and every
+ *  `#define` found in project code, each labelled with its source; hovering
+ *  a directive symbol shows WHERE it is defined; #pragma warning/#nullable/
+ *  #line complete their keywords; unknown directives warn with a
+ *  did-you-mean hint (#ifdef → "#if"); #define after code errors CS1032;
+ *  `#ifdef`/`#ifndef` deliberately absent — C# has no such directives).
+ *  (Phase 14 was: real find-in-files: live debounced
  *  Ctrl+Shift+F search with case / whole-word / regex options, match
  *  highlighting and an honest coverage report that scans cache-warm files
  *  instead of silently missing them; MCP integration — a zero-dependency
@@ -35,7 +47,7 @@
  *  file contents, discovered via <dataDir>/VelvetSharp/mcp.json).
  *  Every delivery bumps by one.
  */
-export const APP_PHASE = 14;
-export const APP_BUILD = "14.0.0";
+export const APP_PHASE = 15;
+export const APP_BUILD = "15.0.0";
 export const APP_LABEL = `Phase ${APP_PHASE}`;
 export const APP_TITLE = `VelvetSharp — ${APP_LABEL}`;

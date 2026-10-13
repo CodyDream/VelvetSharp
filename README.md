@@ -23,10 +23,13 @@ Unity scripts are small, but the IDEs people use for them are not. VelvetSharp s
 - **Cross-class and whole-file awareness** — a method declared at the bottom of the file shows up at the top, in every class of the project, after `instance.`, `this.` and bare
 - **Unity magic methods** — Awake / Start / Update / FixedUpdate / OnCollisionEnter… are synthesized onto MonoBehaviour (34 lifecycle messages with docs), so they always complete
 - **Diagnostics** — syntax squiggles, unreachable code, obsolete references, duplicate types, missing usings (with one-click `using` fixes), out/ref argument checking, csproj-driven assembly + define awareness, and the Phase 9 false-positive kills (`Array.Empty<int>()` is never "missing", ambiguous-reference noise suppressed)
-- **Preprocessor directives are first-class (Phase 11)** — Unity's full define set + `UNITY_<year>_<minor>_OR_NEWER` chain from ProjectVersion.txt + your custom `scriptingDefineSymbols`; inactive `#if` branches are dimmed and silent, `#pragma warning disable` honored, `#error`/`#warning` surfaced, stray directives diagnosed
+- **Full C# + Unity preprocessor (Phase 11 + 15)** — Unity's full define set + the `UNITY_<year>_<minor>_OR_NEWER` chain from ProjectVersion.txt + your custom `scriptingDefineSymbols`; inactive `#if` branches are dimmed and silent, `#pragma warning disable` honored, `#error`/`#warning` surfaced, stray directives diagnosed. **Typing `#` completes all 13 real C# directives** (usage + docs in the tooltip, self-closing `#if … #endif` / `#region … #endregion` snippets); **`#if `/`#elif `/`#define `/`#undef ` complete the whole symbol world, labelled by source** — Unity built-ins, version symbols, csproj DefineConstants, Player Settings scriptingDefineSymbols, `Assets/csc.rsp`/`mcs.rsp` `-define:` flags, and every `#define` in your code with its file+line define sites; hovering a directive symbol explains where it comes from; `#pragma warning`/`#nullable`/`#line` complete their keywords; unknown directives warn with a did-you-mean hint (`#ifdef` → `#if` — C# has no `#ifdef`); `#define` after the first token errors CS1032
+
 - **Hover docs + signature help** straight from `UnityEngine.xml` and the extracted BCL/Unity databases
 - **Go-to-definition (F12) + find-all-references (Shift+F12)** — a Problems-style panel lists every use *and where it comes from*, click to jump; navigation history (Alt+Left/Right) remembers every jump
 - **Project-wide rename (F2)** — every reference in every file, meta files included
+
+![Preprocessor completions](docs/screenshots/preproc-completion.png)
 
 ### Graphs
 - **⬡ Dependency graph** — project types only (classes / structs / interfaces / enums), 4 layouts (hierarchical, organic, circular, business), folder scoping, optional Unity/BCL externals, static-singleton badges with self-loops

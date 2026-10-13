@@ -97,6 +97,89 @@ export function buildDefineSet(custom: Iterable<string>, unityVersion: string): 
   return set;
 }
 
+/* ------------------- Phase 15 — the C# directive catalog ------------------- */
+
+/** one C# preprocessor directive — the completion/hover catalog (Phase 15).
+ *  C# has exactly these thirteen (no #ifdef/#ifndef — that is C/C++; Roslyn
+ *  rejects them with CS1024, and so does our unknown-directive warning). */
+export interface PPDirectiveInfo {
+  name: string;          // without the '#'
+  sig: string;           // usage signature for the tooltip
+  doc: string;           // one-liner shown in the completion detail
+  arg: "expr" | "symbol" | "free" | "pragma" | "nullable" | "line" | "none";
+}
+
+export const PP_DIRECTIVES: PPDirectiveInfo[] = [
+  { name: "if",      sig: "#if EXPRESSION",        doc: "Compile the block only when the expression is true — e.g. #if UNITY_EDITOR.", arg: "expr" },
+  { name: "elif",    sig: "#elif EXPRESSION",      doc: "Alternative branch of an #if — evaluated when all previous branches were false.", arg: "expr" },
+  { name: "else",    sig: "#else",                 doc: "Final alternative branch of an #if/#elif chain.", arg: "none" },
+  { name: "endif",   sig: "#endif",                doc: "Closes the #if/#elif/#else block.", arg: "none" },
+  { name: "define",  sig: "#define SYMBOL",        doc: "Define a conditional-compilation symbol (must appear before any code in the file).", arg: "symbol" },
+  { name: "undef",   sig: "#undef SYMBOL",         doc: "Undefine a conditional-compilation symbol.", arg: "symbol" },
+  { name: "region",  sig: "#region Name",          doc: "Mark a collapsible code region (closed by #endregion).", arg: "free" },
+  { name: "endregion", sig: "#endregion",          doc: "Closes the matching #region.", arg: "none" },
+  { name: "warning", sig: "#warning message",      doc: "Emit a compiler warning from this point in the code.", arg: "free" },
+  { name: "error",   sig: "#error message",        doc: "Emit a compiler error from this point in the code.", arg: "free" },
+  { name: "line",    sig: "#line (number | default | hidden)", doc: "Change the reported line number for diagnostics, or restore them.", arg: "line" },
+  { name: "pragma",  sig: "#pragma warning (disable | restore) [CSxxxx …]", doc: "Suppress or re-enable compiler warnings — e.g. #pragma warning disable CS0168.", arg: "pragma" },
+  { name: "nullable", sig: "#nullable (enable | disable | restore) [warnings | annotations]", doc: "Control nullable-reference-analysis context (C# 8+).", arg: "nullable" },
+];
+
+/** minimum-edit Levenshtein (capped) used by the unknown-directive hint */
+function editDistanceCapped(a: string, b: string, cap: number): number {
+  if (Math.abs(a.length - b.length) > cap) return cap + 1;
+  let prev = new Array(b.length + 1).fill(0).map((_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    let rowMin = cur[0];
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+      rowMin = Math.min(rowMin, cur[j]);
+    }
+    if (rowMin > cap) return cap + 1;
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+/** "#regiong" → "region", "#ifdef" → "if" (prefix hit beats edit distance);
+ *  null when nothing is close enough — the message then just names the miss. */
+export function nearestDirective(word: string, maxDistance = 2): string | null {
+  const w = (word ?? "").toLowerCase();
+  if (!w) return null;
+  for (const d of PP_DIRECTIVES) {
+    if (d.name === w) return d.name;
+    if (d.name.startsWith(w) || w.startsWith(d.name)) return d.name;
+  }
+  let best: string | null = null;
+  let bestD = maxDistance + 1;
+  for (const d of PP_DIRECTIVES) {
+    const dist = editDistanceCapped(w, d.name, bestD);
+    if (dist < bestD) { bestD = dist; best = d.name; }
+  }
+  return bestD <= maxDistance ? best : null;
+}
+
+/** Phase 15 — parse a Unity compiler-response file (Assets/csc.rsp or
+ *  Assets/mcs.rsp) for `-define:` / `/define:` symbols. These files are Unity's
+ *  official hook for project-wide custom defines, so their symbols participate
+ *  in #if evaluation AND the symbol completion catalog. */
+export function parseRspDefines(text: string): string[] {
+  const out: string[] = [];
+  for (const raw of (text ?? "").split(/\r?\n/)) {
+    const t = raw.trim();
+    if (!t || t.startsWith("#")) continue;
+    const m = /^[-\/]define:\s*(.+)$/i.exec(t);
+    if (!m) continue;
+    for (const part of m[1].split(/[,;\s]+/)) {
+      const s = part.trim();
+      if (/^[A-Za-z_]\w*$/.test(s) && !out.includes(s)) out.push(s);
+    }
+  }
+  return out;
+}
+
 /* --------------------------- condition expressions --------------------------- */
 
 /** evaluate a #if/#elif expression with the given symbol set.
@@ -177,6 +260,32 @@ export interface PreprocScan {
   inactive: SemRange[];
   diagnostics: Diagnostic[];
   pragma: PragmaSpan[];
+  /** Phase 15 — every #define/#undef occurrence (even in inactive branches —
+   *  they are still completion candidates, flagged by `active`) */
+  defines: PPDefineOccurrence[];
+}
+
+export interface PPDefineOccurrence {
+  line: number;                  // 0-based
+  sym: string;
+  kind: "define" | "undef";
+  active: boolean;               // inside an active branch?
+}
+
+/** where a completion-catalog symbol comes from (Phase 15) — lower wins when
+ *  the same name is visible from several sources */
+export type PPDefSource = "code" | "scripting" | "project" | "version" | "unity";
+
+export const PP_SOURCE_PRIORITY: Record<PPDefSource, number> = {
+  code: 0, scripting: 1, project: 2, version: 3, unity: 4,
+};
+
+export interface PPDefInfo {
+  name: string;
+  source: PPDefSource;
+  detail: string;
+  /** every #define site found in the project (code-source symbols) */
+  definedIn: { path: string; line: number }[];
 }
 
 const DIRECTIVE_RE = /^\s*#\s*(\w+)\s*(.*?)\s*$/;
@@ -192,6 +301,12 @@ export function scanPreproc(source: string, defined: Set<string>): PreprocScan {
   const diagnostics: Diagnostic[] = [];
   const pragma: PragmaSpan[] = [];
   const inactive: SemRange[] = [];
+  const defines: PPDefineOccurrence[] = [];
+  // CS1032 — #define/#undef must precede the first real token of the file.
+  // Comments (line/block/xml-doc), blank lines and other directives are fine.
+  let seenCode = false;
+  const isCommentLine = (t: string) =>
+    !t || t.startsWith("//") || t.startsWith("/*") || t.startsWith("*") || t.startsWith("*/");
 
   // #if stack: parentActive = was the ENCLOSING branch active; selfActive; taken = any branch true so far; seenElse
   const stack: { parentActive: boolean; selfActive: boolean; taken: boolean; seenElse: boolean; line: number; text: string }[] = [];
@@ -211,6 +326,8 @@ export function scanPreproc(source: string, defined: Set<string>): PreprocScan {
     const raw = lines[i];
     const m = DIRECTIVE_RE.exec(raw);
     if (!m) {
+      const t = raw.trim();
+      if (t && !isCommentLine(t)) seenCode = true;
       const parentActive = stack.every((f) => f.selfActive);
       active[i] = parentActive ? 1 : 0;
       if (!parentActive) {
@@ -313,7 +430,15 @@ export function scanPreproc(source: string, defined: Set<string>): PreprocScan {
         active[i] = 1;
         const sym = arg.trim().split(/\s+/)[0] ?? "";
         if (/^[A-Za-z_]\w*$/.test(sym)) {
-          if (stack.every((f) => f.selfActive)) {
+          const selfActive = stack.every((f) => f.selfActive);
+          defines.push({ line: i, sym, kind, active: selfActive });
+          if (seenCode) {
+            // Roslyn CS1032 — a define after the first token can never do what
+            // the author expects, so it is always a mistake worth surfacing
+            diagnostics.push(preprocDiag(i, raw.indexOf("#"), Math.max(6, raw.trim().length),
+              `Cannot ${kind} the symbol '${sym}' after the first token of the file (CS1032) — move '#${kind} ${sym}' to the top, above all code`, "error"));
+          }
+          if (selfActive) {
             if (kind === "define") localDefined.add(sym);
             else localDefined.delete(sym);
           }
@@ -367,10 +492,24 @@ export function scanPreproc(source: string, defined: Set<string>): PreprocScan {
         }
         break;
       }
-      default: {
-        // #line and anything unknown — directive recognized, no-op (never a parse error)
+      case "line":
+      case "nullable": {
+        // Phase 15 — real C# directives with no analysis impact here: never a
+        // parse error, never an unknown-directive warning
         flushInactiveBeforeDirective();
         active[i] = 1;
+        break;
+      }
+      default: {
+        // unknown directive — Roslyn rejects it (CS1024); we warn with the
+        // closest real directive so the typo is a one-click fix
+        flushInactiveBeforeDirective();
+        active[i] = 1;
+        const hint = nearestDirective(m[1]);
+        diagnostics.push(preprocDiag(i, raw.indexOf("#"), Math.max(1 + m[1].length, raw.trim().length),
+          `Unknown preprocessor directive '#${m[1]}' — C# has no '#${m[1]}'${
+            hint ? ` (did you mean '#${hint}'?)` : ""
+          }`, "warning"));
         break;
       }
     }
@@ -387,7 +526,7 @@ export function scanPreproc(source: string, defined: Set<string>): PreprocScan {
       "Missing '#endregion' for this '#region'", "error"));
   }
 
-  return { active, inactive, diagnostics, pragma };
+  return { active, inactive, diagnostics, pragma, defines };
 }
 
 /* --------------------------- pragma suppression --------------------------- */

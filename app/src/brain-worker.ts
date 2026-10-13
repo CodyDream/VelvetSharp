@@ -88,6 +88,9 @@ const handlers: Record<string, (p: any) => any> = {
   },
   completions: (p) => engine!.completions(p.path, p.line, p.col),
   hover: (p) => engine!.hover(p.path, p.line, p.col),
+  // Phase 15 — the preprocessor symbol catalog (sources + define sites) powering
+  // #if/#define completions and directive-symbol hover
+  preprocCatalog: () => ({ symbols: engine!.preprocCatalog() }),
   signatureHelp: (p) => engine!.signatureHelp(p.path, p.line, p.col),
   definitions: (p) => engine!.definitions(p.path, p.line, p.col),
   outline: (p) => engine!.outline(p.path),

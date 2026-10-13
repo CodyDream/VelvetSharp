@@ -14,7 +14,7 @@ import {
   type AssemblyGraph, type AsmdefInfo,
 } from "./asmdef";
 import { semanticAnalysis } from "./diagnostics";
-import { scanPreproc, buildDefineSet, type PreprocScan } from "./preproc";
+import { scanPreproc, buildDefineSet, versionDefines, UNITY_BASE_DEFINES, type PreprocScan, type PPDefineOccurrence, type PPDefInfo, type PPDefSource, PP_SOURCE_PRIORITY } from "./preproc";
 import { buildDependencyGraph } from "./deps";
 import { symbolAt, computeRename, findSymbolUses, type SymbolUsesResult } from "./rename";
 import { buildCallFlow, type CallFlowResult } from "./callflow";
@@ -66,6 +66,10 @@ export class VelvetSharpEngine {
   /** Phase 11 — project custom defines (ProjectSettings scriptingDefineSymbols
    *  + any extra sources); unioned with csproj DefineConstants for #if */
   private unityDefines = new Set<string>();
+  /** Phase 15 — every file's #define/#undef occurrences (from scanPreproc) so
+   *  the symbol completion catalog can offer user-defined symbols with their
+   *  define sites. Keyed by path; cleaned on removeFile. */
+  private ppDefinesByPath = new Map<string, PPDefineOccurrence[]>();
   /** v0.5.0 — .asmdef reference graph (assembly hunting + completion scoping) */
   private asmGraph: AssemblyGraph | null = null;
   private asmInfo: AsmdefInfo[] = [];
@@ -108,7 +112,7 @@ export class VelvetSharpEngine {
     diagnostics.push(...this.extraLints(content, symbols));
     // Phase 11 — preprocessor: structural directive diagnostics, inactive-branch
     // suppression for syntax/lints, inactive ranges for the editor's dimming
-    const pre = this.preprocPass(content, diagnostics);
+    const pre = this.preprocPass(path, content, diagnostics);
     this.files.set(path, { content, tree, symbols, version: (prev?.version ?? 0) + 1 });
     // incremental index update — only this file's old contributions are removed (was: full rebuild)
     this.reindexFile(path, prev?.symbols ?? null, symbols);
@@ -124,6 +128,7 @@ export class VelvetSharpEngine {
     const prev = this.files.get(path);
     if (!prev) return;
     this.files.delete(path);
+    this.ppDefinesByPath.delete(path); // Phase 15 — its #defines leave the catalog
     this.reindexFile(path, prev.symbols, { path, usings: [], namespaces: [], types: [], members: [], typeRefs: [] });
     this.stats.files = this.files.size;
   }
@@ -173,7 +178,7 @@ export class VelvetSharpEngine {
     const syntax = extractDiagnostics(st.tree);
     syntax.push(...this.extraLints(st.content, st.symbols));
     // Phase 11 — preprocessor filter + structural diagnostics (same as updateFile)
-    const pre = this.preprocPass(st.content, syntax);
+    const pre = this.preprocPass(path, st.content, syntax);
     const sem = semanticAnalysis(this, st, st.tree, st.content, path, pre);
     return { syntax, sem };
   }
@@ -384,11 +389,54 @@ export class VelvetSharpEngine {
     return buildDefineSet([...this.defines, ...this.unityDefines], this.unityVersion);
   }
 
+  /** Phase 15 — the full symbol catalog for preprocessor completions + hover:
+   *  every symbol a `#if` / `#define` could legitimately use, with WHERE it
+   *  comes from. Sources (highest priority wins when a name collides):
+   *   code      — `#define` sites found in project scripts (with define locations)
+   *   scripting — ProjectSettings scriptingDefineSymbols
+   *   project   — csproj DefineConstants
+   *   version   — UNITY_<maj>_<min>_OR_NEWER chain from ProjectVersion.txt
+   *   unity     — the built-in Unity/DEBUG base set */
+  preprocCatalog(): PPDefInfo[] {
+    const byName = new Map<string, PPDefInfo>();
+    const add = (name: string, source: PPDefSource, detail: string, def?: { path: string; line: number }) => {
+      if (!/^[A-Za-z_]\w*$/.test(name)) return;
+      const cur = byName.get(name);
+      if (!cur) {
+        byName.set(name, { name, source, detail, definedIn: def ? [def] : [] });
+        return;
+      }
+      if (def) cur.definedIn.push(def);
+      if (PP_SOURCE_PRIORITY[source] < PP_SOURCE_PRIORITY[cur.source]) {
+        cur.source = source;
+        cur.detail = detail;
+      }
+    };
+    for (const [path, occs] of this.ppDefinesByPath) {
+      for (const o of occs) {
+        if (o.kind !== "define") continue;
+        add(o.sym, "code", `defined in ${path}:${o.line + 1}`, { path, line: o.line });
+      }
+    }
+    for (const d of this.unityDefines) add(d, "scripting", "Player Settings › Scripting Define Symbols");
+    for (const d of this.defines) add(d, "project", "csproj › DefineConstants");
+    if (this.unityVersion) {
+      for (const d of versionDefines(this.unityVersion)) add(d, "version", `Unity ${this.unityVersion} or newer`);
+    }
+    for (const d of UNITY_BASE_DEFINES) add(d, "unity", "Unity built-in define");
+    for (const info of byName.values()) {
+      info.definedIn.sort((a, b) => a.path.localeCompare(b.path) || a.line - b.line);
+    }
+    return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }
+
   /** Phase 11 — run the directive scanner and produce the file's preproc view:
    *  structural diagnostics + inactive runs, with syntax/extra lints filtered
    *  to active lines (VS parity: an inactive branch is not compiled). */
-  private preprocPass(content: string, diagnostics: Diagnostic[]): PreprocScan {
+  private preprocPass(path: string, content: string, diagnostics: Diagnostic[]): PreprocScan {
     const scan = scanPreproc(content, this.preprocDefines());
+    // Phase 15 — remember this file's #define sites for the symbol catalog
+    this.ppDefinesByPath.set(path, scan.defines);
     const isActive = (line: number) => line < scan.active.length && scan.active[line] === 1;
     const kept = diagnostics.filter((d) => isActive(d.line));
     diagnostics.length = 0;
