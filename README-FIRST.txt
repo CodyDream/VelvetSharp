@@ -1,11 +1,11 @@
 ════════════════════════════════════════════════════════════════════
-  VelvetSharp — PHASE 11  ·  portable build (build 11.1.0)
+  VelvetSharp — PHASE 12  ·  portable build (build 12.0.0)
 ════════════════════════════════════════════════════════════════════
 
 VERSION SYSTEM
 ──────────────
 The version is the PHASE number — it bumps by exactly one on every
-delivered update and is never reused. This is Phase 11. The phase is
+delivered update and is never reused. This is Phase 12. The phase is
 always visible in the status bar (bottom right) and in ⚙ Settings.
 
 QUICK START (portable — nothing installs)
@@ -14,6 +14,48 @@ QUICK START (portable — nothing installs)
 2. If the exe is NOT in your Unity project folder: click the folder
    chip in the status bar or the welcome button to pick your project.
 3. First open asks for a COLOR THEME — it is remembered from then on.
+
+WHAT'S NEW IN PHASE 12 — THE CONNECTION IS ROCK SOLID
+──────────────────────────────────────────────────────
+▲ AUTOCOMPLETE CAN NO LONGER SILENTLY DIE (the real bug, hunted down)
+  • Found and fixed a latent renderer bug present since Phase 10: every
+    suggestion batch failed Monaco's internal range validation, so the
+    widget went EMPTY and Monaco fell back to "suggest words from this
+    document" — the literal "abc" noise you saw. It looked random; it
+    was deterministic. The /// doc path used a different code path,
+    which is why it kept working.
+  • Random word suggestions are now OFF entirely, like Rider.
+
+▲ TWO BRAIN LANES — COMPLETIONS NEVER QUEUE BEHIND ANALYSIS
+  • Suggestions/hover/go-to-definition run on a dedicated fast worker;
+    heavy analysis (deep diagnostics, sweeps, graphs, rename) runs on a
+    second worker. Typing in a 3,600-line file no longer delays a
+    completion by the analysis time.
+  • Same-file answers pop INSTANTLY (synchronous floor); the brain's
+    richer answer (docs, parameters, inherited members) upgrades the
+    list in place without a flicker.
+  • The completion cache finally does its job: a cached answer for a
+    shorter prefix now serves longer prefixes (the old cache required
+    an exact match and could never help the next keystroke).
+
+▲ CRASHED BRAIN? IT HEALS ITSELF NOW
+  • A crashed or wedged analysis/interactive worker used to hang its
+    callers forever. Now: pending calls fail fast, the worker
+    respawns, the workspace re-syncs from disk automatically (no
+    reload), and the status bar tells you what happened. Verified by
+    an automated crash drill in the browser test suite.
+
+▲ NATIVE BRIDGE HARDENING
+  • A socket drop no longer loses calls that were already sent — they
+    are replayed once on the fresh connection.
+  • The old zombie-socket rule counted EVERY timeout ever and rebuilt
+    a healthy socket on every second timeout, forever. It now counts
+    consecutive timeouts and resets on every successful call.
+  • A 20-second idle heartbeat detects a dead connection before you
+    click; waking Windows from sleep or regaining the network
+    reconnects immediately.
+  • File reads/writes get 25 s (was 10 s) — big scripts + antivirus
+    scans no longer look like a dead bridge.
 
 WHAT'S NEW IN BUILD 11.1.0 (PR #1 merged)
 ──────────────────────────────────────────
@@ -93,15 +135,14 @@ Phase 7: self-healing bridge, error popup, disk-backed settings,
 
 VERIFICATION THAT SHIPPED WITH THIS BUILD
 ─────────────────────────────────────────
-• 163 engine assertions — the 152 from Phase 11 plus the 11 new
-  snippet tests (SNIP-a..k: class name injection, Awake guard
-  order, OnDestroy self-check, parse-clean expansions, dependency-
-  graph self-loop) — all green.
-• Compiled-dist feature markers — all green (incl. Phase 11 menu,
-  folding provider, /// completion, dimming, version detection,
-  and the new singleton snippets).
+• 169 engine assertions — including 6 new Phase 12 tests pinning the
+  light-update contract the fast lane depends on — all green.
+• 12 cache-probe assertions (prefix-chain semantics) + 74 compiled-
+  dist feature markers — all green.
+• 10/10 browser E2E including a live crash → respawn → resync drill
+  and a word-noise absence check.
 • CI/CD: GitHub Actions tested every push and builds the release
-  zip automatically on the v11.1.0 tag.
+  zip automatically on the v12.0.0 tag.
 
 TROUBLESHOOTING
 ───────────────

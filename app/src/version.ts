@@ -23,10 +23,11 @@
  *  Phase 11 = 11.0.0 · 11.1.0 = PR #1 merged (class-aware Singleton
  *  snippet with guarded Awake + OnDestroy cleanup, 8 more Unity
  *  snippets: SingletonPersistent, OnEnableDisable, TryGetComponent,
- *  NullGuard, RequireComponent, EventAction, Cooldown, GizmoSphere).
+ *  NullGuard, RequireComponent, EventAction, Cooldown, GizmoSphere) ·
+ *  Phase 12 = this build.
  *  Every delivery bumps by one.
  */
-export const APP_PHASE = 11;
-export const APP_BUILD = "11.1.0";
+export const APP_PHASE = 12;
+export const APP_BUILD = "12.0.0";
 export const APP_LABEL = `Phase ${APP_PHASE}`;
 export const APP_TITLE = `VelvetSharp — ${APP_LABEL}`;

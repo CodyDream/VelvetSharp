@@ -8,6 +8,7 @@ import { SEMANTIC_TOKEN_TYPES, SEMANTIC_TOKEN_MODIFIERS } from "@brain/semantic"
 import { computeFoldRanges } from "@brain/folding";
 import { xmlDocForSource } from "@brain/xmldoc";
 import type { BrainClient } from "./brain-client";
+import { cacheLookup, cacheStore, newCacheStore } from "./completion-cache";
 import { defineAllThemes, applyTheme, getSavedThemeId, DEFAULT_THEME } from "./themes";
 import { eolOfMonaco, convertEol } from "./eol";
 
@@ -72,7 +73,7 @@ function getKindMap(): Record<string, monaco.languages.CompletionItemKind> {
   return KIND_MAP;
 }
 
-/* ---------------- Phase 10 — instant bare completions (fast path) ----------------
+/* ---------------- Phase 10/12 — instant bare completions (fast path) ----------------
  *  The brain is the source of truth, but it lives in a worker that is often
  *  busy the moment you need suggestions (every keystroke queues a parse, plus
  *  project sweeps and auto-save IO). Under load the suggest widget popped
@@ -80,10 +81,28 @@ function getKindMap(): Record<string, monaco.languages.CompletionItemKind> {
  *  consistent". The fast path computes same-file methods / fields /
  *  properties synchronously from the model text, so the widget ALWAYS pops
  *  immediately; the brain's richer answer (docs, parameter placeholders,
- *  inherited family members) is raced against a 40 ms budget and cached
- *  stale-while-revalidate for the next keystroke. */
-interface BareCacheEntry { prefix: string; items: RawItem[] }
-const bareCache = new Map<string, BareCacheEntry>();
+ *  inherited family members) is merged in via the prefix-chain cache and a
+ *  guarded late re-trigger.
+ *
+ *  Phase 12 fixes on top:
+ *   - the cache is now a PREFIX CHAIN (a "tr" answer filters down to "tri") —
+ *     the old exact-match lookup made the documented longer-prefix purpose
+ *     impossible;
+ *   - when the synchronous floor is non-empty it is returned IMMEDIATELY and
+ *     the brain answer upgrades the cache (and the open widget) in the
+ *     background — typing is never blocked by a worker round-trip;
+ *   - member access ("foo.") is bounded (300 ms) and falls back to the last
+ *     good member answer for the file instead of waiting forever;
+ *   - the provider never returns a bare empty list on error — it serves the
+ *     last good answer for the file (word-based suggestions are OFF, see
+ *     App.tsx, so empty means a clean "No suggestions", never "abc" noise). */
+const bareCache = newCacheStore();
+const lastGoodByPath = new Map<string, RawItem[]>();
+const lastMemberByPath = new Map<string, RawItem[]>();
+let lastAutoRetrigger = 0;
+
+const raceBudget = <T,>(p: Promise<T>, ms: number): Promise<T | null> =>
+  Promise.race([p, new Promise<null>((r) => setTimeout(() => r(null), ms))]);
 const C_KEYWORDS = new Set([
   "if", "else", "for", "foreach", "while", "do", "switch", "case", "catch", "using",
   "return", "throw", "new", "await", "lock", "fixed", "unsafe", "checked", "unchecked",
@@ -103,6 +122,42 @@ function barePrefixAt(model: any, position: any): string | null {
     if (rest.trimEnd().endsWith(".")) return null; // member access — brain path
     return prefix;
   } catch { return null; }
+}
+
+function sameCaret(ed: any, lineNumber: number, column: number): boolean {
+  try {
+    const p = ed?.getPosition?.();
+    return !!p && p.lineNumber === lineNumber && p.column === column;
+  } catch { return false; }
+}
+
+function suggestWidgetVisible(): boolean {
+  try { return !!document.querySelector(".suggest-widget.visible"); } catch { return false; }
+}
+
+/** Phase 12 — background upgrade: when the brain answers AFTER we already
+ *  served the instant floor, merge its richer answer into the prefix-chain
+ *  cache and — ONLY if the caret has not moved and the suggest widget is
+ *  still open and the answer adds something the user cannot already see —
+ *  re-trigger suggest so the widget refreshes in place. Guards (cooldown,
+ *  caret check, visibility check, "nothing new" check) make this loop-free:
+ *  the re-trigger hits the just-updated cache and returns instantly. */
+function lateUpgrade(
+  req: Promise<RawItem[]>, path: string, prefix: string, locals: RawItem[],
+  shown: RawItem[], lineNumber: number, column: number,
+): void {
+  void req.then((brain) => {
+    if (!Array.isArray(brain) || !brain.length) return;
+    cacheStore(bareCache, path, prefix, dedupeItems(brain, locals));
+    const ed = (window as any).__editor;
+    if (!ed || !sameCaret(ed, lineNumber, column)) return; // typing moved on — cache only
+    if (!suggestWidgetVisible()) return;                   // widget closed — never pop it open
+    if (Date.now() - lastAutoRetrigger < 500) return;      // retrigger cooldown
+    const have = new Set(shown.map((i) => i?.label));
+    if (!brain.some((i) => i && i.label && !have.has(i.label))) return; // nothing new to show
+    lastAutoRetrigger = Date.now();
+    try { ed.trigger("vs-brain-late", "editor.action.triggerSuggest"); } catch { /* widget gone */ }
+  }).catch(() => { /* lane crash → recovery path owns it */ });
 }
 
 /** same-file declarations scanned synchronously from the model text. Line-based
@@ -187,33 +242,49 @@ async function provideCompletionImpl(model: any, position: any): Promise<{ sugge
   const req = client.completions(path, line, col);
 
   if (prefix === null) {
-    // member access / using — the brain's specialised paths, no fast floor
-    let items: any[] = [];
-    try { items = await req; } catch { return { suggestions: [] }; }
-    return { suggestions: toSuggestions(items, model, position) };
+    // member access / using — the brain's specialised paths. Phase 12: the
+    // wait is BOUNDED (the old code awaited unbounded, so a wedged worker
+    // meant "foo." never completed) and a miss falls back to the file's last
+    // good member answer while the live answer upgrades the cache behind it.
+    let brain: RawItem[] | null = null;
+    try { brain = await raceBudget(req, 300); } catch { brain = null; }
+    if (brain) {
+      if (brain.length) {
+        lastMemberByPath.set(path, brain);
+        lastGoodByPath.set(path, brain);
+      }
+      return { suggestions: toSuggestions(brain, model, position) };
+    }
+    lateUpgrade(req, path, "", [], lastMemberByPath.get(path) ?? [], position.lineNumber, position.column);
+    return { suggestions: toSuggestions(lastMemberByPath.get(path) ?? [], model, position) };
   }
 
-  // ---- bare context: instant local floor + raced brain answer ----
+  // ---- bare context: instant local floor + background brain upgrade ----
   const locals = localMemberItems(model, prefix);
-  const cached = bareCache.get(path);
-  const cachedItems = cached && cached.prefix === prefix ? cached.items : [];
-  let brain: RawItem[] | null = null;
-  try {
-    brain = await Promise.race([
-      req,
-      new Promise((r) => setTimeout(() => r(null), 40)),
-    ]);
-  } catch { brain = []; }
+  const cachedItems = cacheLookup(bareCache, path, prefix) as RawItem[];
   const floor = dedupeItems(cachedItems, locals);
-  const merged = brain ? dedupeItems(brain, floor) : floor;
-  const keep = brain ? dedupeItems(brain, locals) : floor;
-  bareCache.set(path, { prefix, items: keep });
-  if (!brain) {
-    // worker busy — revalidate in the background so the NEXT keystroke
-    // (a longer prefix, usually) already merges the fresh, richer answer
-    req.then((v: RawItem[]) => { try { bareCache.set(path, { prefix, items: dedupeItems(v, locals) }); } catch { /* model gone */ } }).catch(() => {});
+
+  if (floor.length) {
+    // instant answer — typing is never blocked by a worker round-trip
+    lateUpgrade(req, path, prefix, locals, floor, position.lineNumber, position.column);
+    lastGoodByPath.set(path, floor);
+    return { suggestions: toSuggestions(floor, model, position) };
   }
-  return { suggestions: toSuggestions(merged, model, position) };
+  // empty floor (brand-new identifier, or a huge file's first light parse):
+  // give the fast lane a short budget before answering empty — the widget
+  // then shows a clean "No suggestions" and the late upgrade refreshes it.
+  try {
+    const brain = await raceBudget(req, 140);
+    if (brain) {
+      if (brain.length) {
+        cacheStore(bareCache, path, prefix, dedupeItems(brain, locals) as any);
+        lastGoodByPath.set(path, brain);
+      }
+      return { suggestions: toSuggestions(brain, model, position) };
+    }
+  } catch { /* lane crash → recovery path; serve what we have */ }
+  lateUpgrade(req, path, prefix, locals, [], position.lineNumber, position.column);
+  return { suggestions: [] };
 }
 
 export function registerProviders(client: BrainClient) {
@@ -229,7 +300,15 @@ export function registerProviders(client: BrainClient) {
         return await provideCompletionImpl(model, position);
       } catch {
         // a completion bug must NEVER surface as an unhandled rejection (which
-        // opens the global error popup mid-typing) — degrade to no suggestions
+        // opens the global error popup mid-typing). Phase 12: degrade to the
+        // file's last GOOD answer instead of a bare empty list — Monaco
+        // filters it against the typed prefix, so a stale superset is safe,
+        // and with word-based suggestions off the alternative is a clean
+        // "No suggestions" rather than random words from the document.
+        try {
+          const last = lastGoodByPath.get(pathOf(model));
+          if (last?.length) return { suggestions: toSuggestions(last, model, position) };
+        } catch { /* model gone */ }
         return { suggestions: [] };
       }
     },
@@ -411,10 +490,16 @@ interface RawItem {
 /** brain items (or fast-path locals) → Monaco suggestions (shared shaping).
  *  `position` is the PROVIDER's caret — ITextModel has no getPosition(). */
 function toSuggestions(items: RawItem[], model: monaco.editor.ITextModel, position: monaco.Position): monaco.languages.CompletionItem[] {
+  // Phase 12 CRITICAL FIX: `getWordUntilPosition` returns IWordAtPosition —
+  // { word, startColumn, endColumn } — which has NO line fields. Since the
+  // Phase 10 refactor this code read `word.startLineNumber` (undefined), so
+  // EVERY suggestion batch failed Monaco's range validation and the whole
+  // widget silently dropped to empty — the real cause of "autocomplete fails
+  // and falls back to word suggestions". (v9 had it right; v10 broke it.)
   const word = model.getWordUntilPosition(position);
   const range = {
-    startLineNumber: word.startLineNumber,
-    endLineNumber: word.endLineNumber,
+    startLineNumber: position.lineNumber,
+    endLineNumber: position.lineNumber,
     startColumn: word.startColumn,
     endColumn: word.endColumn,
   };

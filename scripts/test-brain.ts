@@ -1385,6 +1385,91 @@ async function main() {
     if (failed11.length) process.exitCode = 2;
   }
 
+  // ---- TEST57: Phase 12 — the fast lane's LIGHT update contract ----
+  // The app now mirrors every edit to an interactive lane as updateFile(deep=false)
+  // and runs the deep analysis on a second lane. The interactive lane's whole
+  // value depends on completions/hover/definitions answering CORRECTLY from a
+  // light update — these tests pin that contract so a future engine change
+  // cannot silently break the two-lane design.
+  {
+    const results57: [string, boolean][] = [];
+    const check57 = (name: string, ok: boolean) => {
+      results57.push([name, !!ok]);
+      console.log(`  ${ok ? "PASS" : "FAIL"} — ${name}`);
+    };
+
+    // -- light update: same-file members complete (the per-keystroke path) --
+    engine.updateFile("__test57__/FastLane.cs", [
+      "using UnityEngine;",
+      "public class FastLane : MonoBehaviour",
+      "{",
+      "    private int shieldCharge;",
+      "    public void RechargeShields(float amount)",
+      "    {",
+      "        shield",
+      "    }",
+      "}",
+    ].join("\n"), false); // deep = FALSE — exactly what the fast lane sends
+    const c57 = engine.completions("__test57__/FastLane.cs", 6, 15);
+    check57("TEST57a light update → same-file member completes (shieldCharge)",
+      c57.some((c: any) => c.label === "shieldCharge"));
+    check57("TEST57b light update → same-file method completes (RechargeShields)",
+      c57.some((c: any) => c.label === "RechargeShields" && c.kind === "method"));
+
+    // -- light update: member access on a Unity type (the "foo." path) --
+    engine.updateFile("__test57__/MemberLane.cs", [
+      "using UnityEngine;",
+      "public class MemberLane : MonoBehaviour",
+      "{",
+      "    private void Start()",
+      "    {",
+      "        gameObject.",
+      "    }",
+      "}",
+    ].join("\n"), false);
+    const c57c = engine.completions("__test57__/MemberLane.cs", 5, 19);
+    check57("TEST57c light update → member access answers (gameObject. members)",
+      c57c.length > 0 && c57c.some((c: any) => /component|tag|name|active/i.test(c.label)));
+
+    // -- light update keeps the PROJECT index fresh (cross-file completions) --
+    engine.updateFile("__test57__/Provider.cs",
+      "public class GridService { public void SnapToGrid(int x) { } }", false);
+    engine.updateFile("__test57__/Consumer.cs", [
+      "public class Consumer",
+      "{",
+      "    private void Run()",
+      "    {",
+      "        GridService g;",
+      "        g.",
+      "    }",
+      "}",
+    ].join("\n"), false);
+    const c57d = engine.completions("__test57__/Consumer.cs", 5, 10);
+    check57("TEST57d light updates → cross-file member completes (SnapToGrid)",
+      c57d.some((c: any) => c.label === "SnapToGrid"));
+
+    // -- light update still reports SYNTAX errors (squiggles never wait for deep) --
+    const bad57 = engine.updateFile("__test57__/Broken.cs", "class Broken { void X( { }", false);
+    check57("TEST57e light update → syntax errors still surface",
+      bad57.diagnostics.some((d: any) => d.severity === "error"));
+
+    // -- light update is CHEAPER than deep (the reason the lane exists) --
+    const big = ["public class Big {", ...Array.from({ length: 400 }, (_, i) => `    public int Field${i} = ${i};`), "}"].join("\n");
+    const t0 = performance.now();
+    engine.updateFile("__test57__/BigLight.cs", big, false);
+    const lightMs = performance.now() - t0;
+    const t1 = performance.now();
+    engine.updateFile("__test57__/BigDeep.cs", big, true);
+    const deepMs = performance.now() - t1;
+    check57(`TEST57f light parse is cheaper than deep (fast lane stays responsive: ${lightMs.toFixed(1)}ms vs ${deepMs.toFixed(1)}ms)`,
+      lightMs < deepMs);
+
+    const failed57 = results57.filter(([, ok]) => !ok);
+    console.log(`\n=========== Phase 12 RESULT: ${results57.length - failed57.length}/${results57.length} PASS ===========`);
+    for (const [name] of failed57) console.log("  FAILED:", name);
+    if (failed57.length) process.exitCode = 2;
+  }
+
   // ---- Phase 9 summary ----
   const failed8 = results8.filter(([, ok]) => !ok);
   console.log(`\n=========== Phase 8 RESULT: ${results8.length - failed8.length}/${results8.length} PASS ===========`);

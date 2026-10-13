@@ -32,6 +32,10 @@ interface PendingCall {
   reject: (e: Error) => void;
   timer: ReturnType<typeof setTimeout>;
   method: string;
+  data?: any;
+  /** Phase 12: set when this call was already replayed once after a drop —
+   *  a second drop rejects it instead of replaying forever */
+  retried?: boolean;
 }
 
 interface QueuedCall {
@@ -40,11 +44,16 @@ interface QueuedCall {
   resolve: (v: any) => void;
   reject: (e: Error) => void;
   timeoutMs: number;
+  retried?: boolean;
 }
 
 const DEFAULT_TIMEOUT = 10_000;   // per-call timeout — no native call may hang forever
 const RECONNECT_MAX_MS = 5_000;
 const RECONNECT_BASE_MS = 300;
+/** Phase 12 — idle heartbeat: proves the socket is alive even when the UI is
+ *  quiet, so a zombie socket is detected in seconds instead of at the next
+ *  user action. Two missed beats trip the same zombie-reconnect rule. */
+const HEARTBEAT_MS = 20_000;
 
 let ws: WebSocket | null = null;
 let state: BridgeState = "offline";
@@ -61,6 +70,14 @@ export const bridgeStats = {
   lastErrorAt: 0,
   reconnects: 0,
   timeouts: 0,
+  /** Phase 12 — CONSECUTIVE timeouts on the current socket; reset by every
+   *  successful answer and by reconnects. (The old code tested the LIFETIME
+   *  timeout counter for evenness and never reset it, so after two timeouts
+   *  ever, every second later timeout tore down a perfectly healthy socket
+   *  and orphaned the calls riding on it.) */
+  consecTimeouts: 0,
+  /** Phase 12 — calls replayed after a socket drop (in-flight recovery) */
+  replayed: 0,
   host: "127.0.0.1",
 };
 
@@ -160,6 +177,7 @@ export function connectBridge(): void {
       const p = pending.get(msg.id)!;
       pending.delete(msg.id);
       clearTimeout(p.timer);
+      bridgeStats.consecTimeouts = 0; // a live answer resets the zombie counter
       if (msg.data?.error) {
         const code = String(msg.data.error.code ?? "NE_UNKNOWN");
         const message = String(msg.data.error.message ?? "native call failed");
@@ -183,8 +201,23 @@ export function connectBridge(): void {
     if (ws !== sock) return; // superseded by a newer socket
     ws = null;
     setState("offline");
-    // pending calls stay parked: their own timers decide when to give up,
-    // and a successful reconnect re-sends the queued ones transparently
+    // Phase 12 — IN-FLIGHT RECOVERY (was: only calls made while offline were
+    // replayed; calls already sent died on their 10 s timers): calls still
+    // waiting for an answer are re-queued ONCE, in order, onto the fresh
+    // socket as soon as it opens. Reads are trivially idempotent; writes
+    // replay with identical payloads. A call that has already been replayed
+    // once and sees a second drop fails LOUDLY instead of looping.
+    let front = 0;
+    for (const [id, p] of [...pending]) {
+      pending.delete(id);
+      clearTimeout(p.timer);
+      if (p.retried) {
+        p.reject(new Error(`bridge dropped twice before "${p.method}" answered — giving up`));
+      } else {
+        queue.splice(front++, 0, { method: p.method, data: p.data, resolve: p.resolve, reject: p.reject, timeoutMs: DEFAULT_TIMEOUT, retried: true });
+        bridgeStats.replayed++;
+      }
+    }
     scheduleReconnect();
   };
   sock.addEventListener("close", dropped);
@@ -212,13 +245,13 @@ export function forceReconnect(): void {
 function flushQueue(): void {
   while (queue.length) {
     const q = queue.shift()!;
-    sendNow(q.method, q.data, q.timeoutMs).then(q.resolve, q.reject);
+    sendNow(q.method, q.data, q.timeoutMs, q.retried).then(q.resolve, q.reject);
   }
 }
 
 /* ------------------------------ call ------------------------------ */
 
-function sendNow(method: string, data: any, timeoutMs: number): Promise<any> {
+function sendNow(method: string, data: any, timeoutMs: number, retried = false): Promise<any> {
   return new Promise((resolve, reject) => {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       reject(new Error(`bridge offline — "${method}" not sent`));
@@ -228,13 +261,19 @@ function sendNow(method: string, data: any, timeoutMs: number): Promise<any> {
     const timer = setTimeout(() => {
       pending.delete(id);
       bridgeStats.timeouts++;
+      bridgeStats.consecTimeouts++;
       bridgeStats.lastError = `timeout: ${method}`;
       bridgeStats.lastErrorAt = Date.now();
-      // two+ timeouts in a row means the socket is a zombie — rebuild it
-      if (bridgeStats.timeouts % 2 === 0) forceReconnect();
+      // two consecutive timeouts on the CURRENT socket mean it is a zombie —
+      // rebuild it (the counter resets on every answer and on reconnect, so
+      // one slow call over a healthy socket can no longer tear it down)
+      if (bridgeStats.consecTimeouts >= 2) {
+        bridgeStats.consecTimeouts = 0;
+        forceReconnect();
+      }
       reject(new Error(`native bridge timeout after ${Math.round(timeoutMs / 1000)}s — ${method}`));
     }, timeoutMs);
-    pending.set(id, { resolve, reject, timer, method });
+    pending.set(id, { resolve, reject, timer, method, data, retried });
     try {
       ws.send(JSON.stringify({ id, method, data, accessToken: rawToken() }));
     } catch (e: any) {
@@ -286,6 +325,44 @@ export async function bridgeSelfTest(): Promise<{ ok: boolean; rttMs: number; de
   }
 }
 
+/* ---------------------- liveness: heartbeat + wake ----------------------
+ *  Windows sleep / VPN blips used to go unnoticed until the next user action
+ *  failed. Now: a 20 s heartbeat proves the socket while the UI is idle, and
+ *  waking the machine / regaining the network reconnects immediately. */
+
+let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+function startHeartbeat(): void {
+  if (heartbeatTimer) return;
+  heartbeatTimer = setInterval(() => {
+    if (state !== "connected") return;
+    try { if (document.visibilityState !== "visible") return; } catch { /* non-DOM */ }
+    // a missed beat lands in the timeout path (consecTimeouts++) — two missed
+    // beats rebuild the socket without waiting for a user action to fail
+    nlCall("app.getProcessId", undefined, 6_000).catch(() => { /* zombie rule owns it */ });
+  }, HEARTBEAT_MS);
+}
+
+function installWakeHandlers(): void {
+  try {
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState !== "visible") return;
+      if (state === "connected") return;
+      // woke up — skip the backoff and reconnect right now
+      attempts = 0;
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      connectBridge();
+    });
+    window.addEventListener("online", () => {
+      if (state === "connected") return;
+      attempts = 0;
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      connectBridge();
+    });
+  } catch { /* non-DOM environment */ }
+}
+startHeartbeat();
+installWakeHandlers();
+
 /* --------------------------- namespace shims ---------------------------
  * Drop-in surface mirroring the parts of @neutralinojs/lib the app uses, so
  * adapters/projectCache/App need zero API changes — they just import THIS
@@ -293,8 +370,10 @@ export async function bridgeSelfTest(): Promise<{ ok: boolean; rttMs: number; de
 
 const filesystem = {
   getStats: (path: string) => nlCall("filesystem.getStats", { path }, 15_000),
-  readFile: (path: string) => nlCall("filesystem.readFile", { path }),
-  writeFile: (path: string, data: string) => nlCall("filesystem.writeFile", { path, data }),
+  // Phase 12: 25 s for file IO — 10 s was short for multi-MB scripts while
+  // antivirus scans them; a timeout here used to cascade into a reconnect
+  readFile: (path: string) => nlCall("filesystem.readFile", { path }, 25_000),
+  writeFile: (path: string, data: string) => nlCall("filesystem.writeFile", { path, data }, 25_000),
   readDirectory: (path: string) => nlCall("filesystem.readDirectory", { path }, 20_000),
   createDirectory: (path: string) => nlCall("filesystem.createDirectory", { path }),
   remove: (path: string) => nlCall("filesystem.remove", { path }),

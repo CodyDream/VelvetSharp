@@ -68,8 +68,8 @@ check("config hydration at boot", /hydrateConfigFromDisk/.test(js));
 check("no fragile stock client import", !/@neutralinojs\/lib/.test(js));
 
 // 4c. version system present (bumped every phase — see VERSIONS.md checklist)
-check("version chip (status bar)", /version-chip/.test(js) && js.includes("Phase 11"));
-check("Settings version row (build 11.1.0)", js.includes("11.1.0") && /settings-path/.test(js));
+check("version chip (status bar)", /version-chip/.test(js) && js.includes("Phase 12"));
+check("Settings version row (build 12.0.0)", js.includes("12.0.0") && /settings-path/.test(js));
 check("no stale 0.7.1 branding", !js.includes("v0.7.1 —"));
 
 // 4d. Phase 8 features present
@@ -113,7 +113,16 @@ check("Unity project version detection (ProjectVersion.txt)", js.includes("Proje
 check("custom scripting defines detection", js.includes("scriptingDefineSymbols"));
 check("collapse commands in palette", js.includes("View: Collapse by Methods") && js.includes("View: Expand All"));
 check("editor context menu capture wiring", js.includes("setEditorCtxMenu"));
-check("Phase 11 version chip", js.includes("Phase 11") && js.includes("11.1.0"));
+check("Phase 12 version chip", js.includes("Phase 12") && js.includes("12.0.0"));
+// 4i. Phase 12 — rock-solid bridge + never-miss completions
+check("two-lane brain (fast + heavy workers)", js.includes("lane crashed: ") && js.includes("simulateCrash") && js.includes("lane is back online"));
+check("lane crash recovery wired (respawn + resync)", js.includes("lane restarted") && js.includes("onRespawn"));
+check("prefix-chain cache consumer + guarded late re-trigger", js.includes("vs-brain-late") && js.includes("editor.action.triggerSuggest"));
+check("word-based suggestions OFF (no more 'abc' noise)", /wordBasedSuggestions/.test(js) && !/wordBasedSuggestions:"(currentDocument|allDocuments|matchingDocuments|true)"/.test(js));
+check("bridge: in-flight replay after socket drop", js.includes("replayed") && js.includes("dropped twice before"));
+check("bridge: consecutive-timeout zombie rule (resets on success)", js.includes("consecTimeouts"));
+check("bridge: idle heartbeat + wake reconnect", js.includes("app.getProcessId") && /visibilitychange/.test(js) && /"online"/.test(js));
+check("bridge: 25s file IO budget", /25e3|25_000|25000/.test(js));
 // 4h. Phase 11.1 — PR #1 merged: class-aware singleton + extra Unity snippets
 check("class-aware Singleton snippet bundle (PR #1)", js.includes("SingletonPersistent") && js.includes("GizmoSphere") && js.includes("TryGetComponent"));
 check("singleton Awake guard shipped", js.includes("an instance already exists on"));

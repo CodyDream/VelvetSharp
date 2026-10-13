@@ -37,6 +37,14 @@ export async function boot() {
     const client = new BrainClient();
     (window as any).__client = client;
     client.onStatus = (s) => useStore.getState().setStatus(s);
+    // Phase 12 — when a lane crashes (or wedges), it respawns with an EMPTY
+    // engine; this hook rebuilds its state from disk so completions keep
+    // working without a page reload.
+    client.onRespawn = async (lane) => {
+      useStore.getState().setStatus(`brain ${lane} lane restarted — resyncing workspace…`);
+      await resyncBrainAfterSpawn();
+      useStore.getState().setStatus(`brain ${lane} lane resynced · ${useStore.getState().stats.files} files indexed`);
+    };
     useStore.getState().setStatus("engine booting (worker)…");
     await client.init();
     if (client.unityInfo.label) {
@@ -114,6 +122,37 @@ async function flushAutoSave(path?: string): Promise<void> {
 /** Scan + csproj auto-config + index + open first script. Called from boot()
  *  and again after a workspace change (no page reload — the Neutralino
  *  websocket auth does not survive navigations reliably). */
+/* ------------------- Phase 12 — lane-respawn engine resync ------------------- */
+
+/** the exact configureProjects payload applied at boot — replayed verbatim
+ *  when a brain lane respawns so the fresh engine sees the same world */
+let lastProjectConfig: { csprojInfos: any[]; asmdefs: any[]; unity: { version: string; defines: string[] } } | null = null;
+
+/** rebuild a respawned lane's engine state from disk: fresh scan → sync →
+ *  project config → loadFiles. Mirrored calls reach BOTH lanes (the healthy
+ *  one no-ops over identical state; the respawned one rebuilds), and the
+ *  respawned lane's worker buffers them until its engine is ready, so the
+ *  ordering configureProjects → syncFiles → loadFiles is preserved. */
+async function resyncBrainAfterSpawn() {
+  const client = (window as any).__client as BrainClient | undefined;
+  if (!client) return;
+  const adapter = getAdapter();
+  const files = await adapter.listFiles();
+  const csFiles = files.filter((f) => f.endsWith(".cs"));
+  const loaded: { path: string; content: string }[] = [];
+  for (const p of csFiles) {
+    try { loaded.push({ path: p, content: await adapter.read(p) }); }
+    catch { /* vanished mid-resync — syncFiles below drops it */ }
+  }
+  if (lastProjectConfig) {
+    await client.configureProjects(lastProjectConfig.csprojInfos, lastProjectConfig.asmdefs, lastProjectConfig.unity);
+  }
+  await client.syncFiles(csFiles);
+  if (loaded.length) await client.loadFiles(loaded);
+  // auto-save flushed the active tab ≤1.2 s ago, so disk content is fresh;
+  // any keystroke after the resync re-uploads the live model via __onEdit
+}
+
 async function loadWorkspace(client: BrainClient) {
   const adapter = getAdapter();
   useStore.getState().setStatus(`scanning ${adapter.name}…`);
@@ -203,6 +242,9 @@ async function loadWorkspace(client: BrainClient) {
       } catch { /* no ProjectSettings.asset — csproj defines only */ }
     }
     const res = await client.configureProjects(csprojInfos, asmdefs, { version: unityVersion, defines: projectDefines });
+    // Phase 12 — remembered so a lane-respawn resync can re-apply the exact
+    // same project config without re-parsing csproj/asmdef files
+    lastProjectConfig = { csprojInfos, asmdefs, unity: { version: unityVersion, defines: projectDefines } };
     useStore.getState().setProjects(res.projects, res.defines ?? []);
     if (res.asmdef) {
       useStore.getState().setAsmdefInfo(
@@ -1951,6 +1993,12 @@ function EditorArea() {
         // the fold gutter is always visible next to the new folding provider
         acceptSuggestionOnEnter: "on",
         showFoldingControls: "always",
+        // Phase 12 — Monaco's built-in "suggest words from this document" was
+        // the "abc" noise the user saw whenever the C# provider came up empty
+        // (worker busy / crashed). The engine now guarantees a real answer
+        // (instant floor + prefix-chain cache + last-good fallback), so the
+        // word fallback is pure noise — off, like Rider.
+        wordBasedSuggestions: "off",
       });
       (window as any).__editor = edRef.current;
 
