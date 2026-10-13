@@ -77,6 +77,8 @@ interface VSState {
   graphFlowFile: string | null;       // the script the flow view renders
   renameWidget: null | { path: string; line: number; col: number; oldName: string; kind: string };
   ctxMenu: null | { x: number; y: number; path: string; dir: boolean };
+  /** Phase 11 — right-click menu INSIDE the editor (Collapse ▸ submenu etc.) */
+  editorCtxMenu: null | { x: number; y: number };
 
   // v0.7.0 — themes, editor preferences, line endings
   themePicker: null | { firstRun: boolean };
@@ -137,6 +139,7 @@ interface VSState {
   refreshGraph: () => void;
   setRenameWidget: (r: VSState["renameWidget"]) => void;
   setCtxMenu: (c: VSState["ctxMenu"]) => void;
+  setEditorCtxMenu: (m: VSState["editorCtxMenu"]) => void;
   setThemePicker: (p: VSState["themePicker"]) => void;
   toggleWordWrap: () => void;
   toggleAutoSave: () => void;
@@ -194,6 +197,7 @@ export const useStore = create<VSState>((set) => ({
   graphFlowFile: null,
   renameWidget: null,
   ctxMenu: null,
+  editorCtxMenu: null,
   themePicker: null,
   wordWrap: (() => { try { return localStorage.getItem("velvetsharp.wordWrap") === "1"; } catch { return false; } })(),
   autoSave: (() => { try { return localStorage.getItem("velvetsharp.autoSave") !== "0"; } catch { return true; } })(),
@@ -254,6 +258,7 @@ export const useStore = create<VSState>((set) => ({
   refreshGraph: () => set({ graphSeed: Date.now() }),
   setRenameWidget: (renameWidget) => set({ renameWidget }),
   setCtxMenu: (ctxMenu) => set({ ctxMenu }),
+  setEditorCtxMenu: (editorCtxMenu) => set({ editorCtxMenu }),
   setThemePicker: (themePicker) => set({ themePicker }),
   toggleWordWrap: () => set((s) => {
     const wordWrap = !s.wordWrap;

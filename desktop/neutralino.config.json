@@ -4,7 +4,7 @@
   "author": "VelvetSharp",
   "description": "VelvetSharp Phase 10 — lightweight Unity C# IDE",
   "copyright": "Copyright © 2026 VelvetSharp",
-  "version": "10.0.0",
+  "version": "11.0.0",
   "defaultMode": "window",
   "port": 0,
   "documentRoot": "/app/dist/",

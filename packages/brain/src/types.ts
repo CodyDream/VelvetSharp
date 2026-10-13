@@ -79,6 +79,9 @@ export interface Diagnostic {
   severity: "error" | "warning" | "info";
   source: string;
   fix?: QuickFix;             // when present the Problems bar / editor offer a one-click fix
+  /** Phase 11 — compiler-style code ("CS0219", "CS0618"…). Lets in-file
+   *  `#pragma warning disable CS0219` suppress the matching warnings. */
+  code?: string;
 }
 
 export type CompletionKind =
@@ -146,6 +149,9 @@ export interface SemanticReport {
   diagnostics: Diagnostic[];
   unreachable: SemRange[];   // grey out
   obsolete: SemRange[];      // strikethrough
+  /** Phase 11 — preprocessor-inactive runs (a false #if branch). Rendered
+   *  dimmed like VS; diagnostics inside them are suppressed at the source. */
+  inactive?: SemRange[];
 }
 
 /** flat, line-ordered outline of one document (classes → members) */

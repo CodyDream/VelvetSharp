@@ -37,8 +37,10 @@ export const CS_MONARCH = {
 
   tokenizer: {
     root: [
-      // preprocessor directives
-      [/^\s*#\s*\w+/, "preprocessor"],
+      // preprocessor directives — the WHOLE line takes the directive color
+      // (Phase 11: previously only `#if` was tinted and the symbol looked like
+      // a type; VS tints the entire directive line)
+      [/^\s*#\s*\w+.*$/, "preprocessor"],
 
       // comments
       [/\/\/\/.*$/, "comment.doc"],

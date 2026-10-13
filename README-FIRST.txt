@@ -1,11 +1,11 @@
 ════════════════════════════════════════════════════════════════════
-  VelvetSharp — PHASE 10  ·  portable build (build 10.0.0)
+  VelvetSharp — PHASE 11  ·  portable build (build 11.0.0)
 ════════════════════════════════════════════════════════════════════
 
 VERSION SYSTEM
 ──────────────
 The version is the PHASE number — it bumps by exactly one on every
-delivered update and is never reused. This is Phase 10. The phase is
+delivered update and is never reused. This is Phase 11. The phase is
 always visible in the status bar (bottom right) and in ⚙ Settings.
 
 QUICK START (portable — nothing installs)
@@ -15,66 +15,71 @@ QUICK START (portable — nothing installs)
    chip in the status bar or the welcome button to pick your project.
 3. First open asks for a COLOR THEME — it is remembered from then on.
 
-WHAT'S NEW IN PHASE 10
+WHAT'S NEW IN PHASE 11
 ──────────────────────
-▲ CALL FLOW GRAPH — STABLE (no more crashes / frozen canvas)
-  • Big scripts no longer break the view: the engine now walks the
-    whole call set and keeps the MOST CONNECTED methods instead of a
-    blind first-N cut (a 220-method stress script keeps 400/400 edges;
-    it used to render 150 isolated callers with the helpers missing).
-  • Any internal error becomes a readable message in the graph panel
-    (with a ⟳ retry) — never a silent blank screen or a dead spinner.
-  • Layouts hardened end to end: stack-proof layering, an unbreakable
-    grid backstop, debounced index refresh, and a fixed wheel listener.
+▲ #if UNITY_EDITOR AND ALL # SYMBOLS ARE FIRST-CLASS NOW
+  • VelvetSharp knows Unity's standard define set (all platforms +
+    editor flags, exactly like the constants in Unity's generated
+    .csproj), so every standard branch is analyzed with zero false
+    errors — #if / #elif / #else / #endif, #ifdef, #ifndef.
+  • Your project's Unity version is read from ProjectSettings/
+    ProjectVersion.txt → UNITY_2022_3_OR_NEWER-style symbols match
+    YOUR editor, and custom defines from ProjectSettings.asset
+    (scriptingDefineSymbols) participate too.
+  • False branches behave like VS: the code is DIMMED in the editor
+    and no diagnostics are invented inside it (unknown symbols stay
+    gray instead of spraying errors).
+  • Real structural checks: stray #endif / #endregion, an #if or
+    #region that never closes, #elif after #else, malformed
+    expressions — each points at the offending line.
+  • #pragma warning disable / restore is honored (CS0219, CS0618,
+    CS0162…, or bare "#pragma warning disable" for everything), and
+    #error / #warning directives now surface their messages.
+  • Whole directive lines get the preprocessor color.
 
-▲ GRAPHS — NEW VERTICAL LAYOUT (your "too horizontal" report)
-  • Call Flow now ALWAYS renders as a real flowchart: entries on top,
-    calls flow DOWN, every branch owns its own column, external calls
-    end as dashed terminals. Deep chains grow tall, not wide.
-  • Types mode gets a "Vertical" button too (tidy-tree flowchart) next
-    to Hierarchical / Organic / Circular / Business.
+▲ RIGHT-CLICK IN THE EDITOR → COLLAPSE MENU (your request)
+  • Right-click any script → "Collapse" with sub-options:
+      Collapse by Methods · Collapse by #Regions · Collapse by
+      #if Blocks · Collapse XML Doc Comments · Collapse All ·
+      Expand All. Also available in Ctrl+Shift+P ("View: Collapse…").
+  • Powered by a precise folding engine: methods fold from the
+    SIGNATURE line (never hiding the header), #region/#if blocks and
+    /// doc comments above methods fold too, and the fold gutter
+    arrows are always visible.
 
-▲ AUTO-COMPLETION — ALWAYS POPS, SOLID + CONSISTENT (your report)
-  • Same-script methods/fields/properties now come from an instant
-    local scan, so the suggestion widget pops immediately every time —
-    even while the brain worker is busy parsing. The brain's richer
-    answer (docs, parameter placeholders, inherited members) merges in
-    the moment it answers and is cached for the next keystroke.
-  • A completion bug can no longer pop the global error popup while
-    you type — worst case it degrades to plain word suggestions.
-  • The space bar no longer triggers the widget after every word.
+▲ /// + ENTER = XML DOCUMENTATION (your request)
+  • Type /// on the empty line above a method and press Enter: the
+    skeleton inserts itself — <summary>, one <param name="…"> per
+    parameter, <returns> for non-void, <value> for properties — with
+    tab stops to jump through the placeholders. Constructors,
+    indexers, properties, fields and types all get the right shape.
+  • Pressing Enter inside a doc comment keeps continuing with ///.
 
-▲ NEW: NAVIGATION HISTORY (Go Back / Go Forward)
-  • Alt+Left walks back through every jump — F12 go-to-definition,
-    search hits, problems, outline clicks, uses panel, graph
-    double-click. Alt+Right goes forward again. Also in the command
-    palette as "Navigate: Go Back / Go Forward".
-  • Ctrl+MouseWheel zooms the editor (like Rider / VS Code).
+▲ FIXED ALONG THE WAY
+  • A latent completion-provider bug (an internal reference that
+    could throw and silently empty the suggestion list) is gone.
 
-STILL ALL OF PHASE 9
-────────────────────
-False-positive kills (`Array.Empty<int>()`, ambiguous-reference
-suppression), Problems right-click → copy one problem, static
-singleton self-loops in the graph, Call Flow view with external
-terminals, plus all of Phase 8: types-only dependency graph, whole-
-file + base-family completions, Unity magic methods, uses panel
-(Shift+F12), and all of Phase 7: self-healing native bridge, error
-popup, disk-backed settings, 7 themes, CRLF/LF, explorer file ops,
-F2 project-wide rename, Problems bar, snippets, palette, auto-save.
+STILL ALL OF PHASE 10
+─────────────────────
+Stable Call Flow graph with ranked selection, the Vertical tidy-tree
+layout, always-popping completions (instant local fast path), Alt+
+Left/Right navigation history, Ctrl+Wheel zoom — and everything from
+Phase 9: false-positive kills, Problems right-click copy, singleton
+self-loops, Call Flow view; Phase 8: types-only dependency graph,
+base-family completions, Unity magic methods, uses panel (Shift+F12);
+Phase 7: self-healing bridge, error popup, disk-backed settings,
+7 themes, CRLF/LF, explorer file ops, F2 project-wide rename.
 
 VERIFICATION THAT SHIPPED WITH THIS BUILD
 ─────────────────────────────────────────
-• 139 engine assertions — including 8 new Phase 10 tests: ranked
-  selection keeps helpers + 300+ edges on a 220-method script,
-  mutual/self recursion terminates, entry flags recomputed from the
-  surviving subgraph — all green.
-• 53 compiled-dist feature markers — all green.
-• 44/44 visual end-to-end checks with screenshots — including the
-  flow geometry (rows ≥ 4, no wide strip, Start above BuildPayload
-  above LogPayload), suggest-widget pop, F12 → Alt+Left → Alt+Right
-  round trip, Ctrl+Wheel zoom.
-• 21 content markers inside resources.neu — all green.
-• CI/CD: GitHub Actions tested every push and built the release.
+• 152 engine assertions — including 23 new Phase 11 tests: define
+  evaluation, inactive-branch suppression (and the dedupe-slot fix),
+  structural directive errors, pragma suppression, folding ranges,
+  /// skeletons — all green.
+• Compiled-dist feature markers — all green (incl. Phase 11 menu,
+  folding provider, /// completion, dimming, version detection).
+• CI/CD: GitHub Actions tested every push and builds the release
+  zip automatically on the v11.0.0 tag.
 
 TROUBLESHOOTING
 ───────────────

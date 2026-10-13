@@ -1234,6 +1234,157 @@ async function main() {
     if (failedS.length) process.exitCode = 2;
   }
 
+  // ---- TEST56: Phase 11 — preprocessor directives (#if UNITY_EDITOR & friends) ----
+  {
+    const results11: [string, boolean][] = [];
+    const check11 = (name: string, ok: boolean) => {
+      results11.push([name, !!ok]);
+      console.log(`  ${ok ? "PASS" : "FAIL"} — ${name}`);
+    };
+    const pre = await import("../packages/brain/src/preproc");
+    const fold = await import("../packages/brain/src/folding");
+    const xmldoc = await import("../packages/brain/src/xmldoc");
+
+    // -- expression evaluation --
+    const defines = pre.buildDefineSet(["MY_TOOL"], "2022.3.41f1");
+    check11("TEST56a UNITY_EDITOR + platforms predefined (Unity csproj parity)",
+      defines.has("UNITY_EDITOR") && defines.has("UNITY_STANDALONE_WIN") && defines.has("UNITY_ANDROID") && defines.has("DEBUG"));
+    check11("TEST56b version chain from ProjectVersion (2022.3 → UNITY_2022_3_OR_NEWER, not 6000)",
+      defines.has("UNITY_2022_3_OR_NEWER") && !defines.has("UNITY_6000_0_OR_NEWER"));
+    check11("TEST56c custom define participates (MY_TOOL)",
+      pre.evaluatePreprocExpr("MY_TOOL", defines) === true);
+    check11("TEST56d unknown symbol is false (branch inactive, not an error)",
+      pre.evaluatePreprocExpr("SOME_UNKNOWN_FLAG", defines) === false);
+    check11("TEST56e expression operators (&&, ||, !, parens)",
+      pre.evaluatePreprocExpr("(DEBUG || MY_TOOL) && !SOME_UNKNOWN_FLAG", defines) === true
+      && pre.evaluatePreprocExpr("UNITY_EDITOR && !UNITY_EDITOR", defines) === false);
+    check11("TEST56f malformed expression throws (becomes a diagnostic)",
+      (() => { try { pre.evaluatePreprocExpr("A &&", defines); return false; } catch { return true; } })());
+
+    // -- engine-level: false positives inside branches are suppressed like VS --
+    engine.updateFile("__test56__/PreprocDemo.cs", [
+      "using UnityEngine;",
+      "",
+      "public class PreprocDemo : MonoBehaviour",
+      "{",
+      "#if !UNITY_EDITOR",
+      "    private DistantType standaloneField;",   // inactive → NO error
+      "#endif",
+      "",
+      "#if UNITY_EDITOR",
+      "    private DistantType editorField;",       // active → CS0246 error expected
+      "#endif",
+      "",
+      "#if SOME_UNKNOWN_FLAG",
+      "    private DistantType unknownField;",      // inactive → NO error
+      "#endif",
+      "}",
+    ].join("\n"), true);
+    engine.updateFile("__test56__/DistantType.cs", "namespace Far.Away { public class DistantType { } }", true);
+    const r56 = engine.updateFile("__test56__/PreprocDemo.cs", engine.fileContent("__test56__/PreprocDemo.cs") ?? "", true);
+    const d56 = (r56.diagnostics ?? []).concat(r56.sem?.diagnostics ?? []);
+    const distantErrors = d56.filter((d: any) => /DistantType' could not be found/.test(d.message));
+    check11("TEST56g exactly ONE 'could not be found' (the UNITY_EDITOR branch)",
+      distantErrors.length === 1 && distantErrors[0].line === 9);
+    check11("TEST56h inactive branch dimming ranges returned (semantic report)",
+      (r56.sem?.inactive ?? []).length >= 2);
+    check11("TEST56i inactive branch suppresses even SYNTAX lints",
+      !d56.some((d: any) => d.line === 5 || d.line === 13));
+
+    // -- structural directive diagnostics --
+    const bad56 = engine.updateFile("__test56__/BadDirectives.cs", [
+      "#region A",
+      "public class BadDirectives { }",
+      "#endregion",
+      "#endregion",                 // stray
+      "#region B",                  // never closed
+      "#if UNITY_EDITOR",
+      "public class NeverClosed { }", // #if never closed
+    ].join("\n"), true);
+    check11("TEST56j stray #endregion error", bad56.diagnostics.some((d: any) => /Unexpected '#endregion'/.test(d.message)));
+    check11("TEST56k missing #endif error at the #if line", bad56.diagnostics.some((d: any) => /Missing '#endif'/.test(d.message) && d.line === 5));
+    check11("TEST56l missing #endregion error at the #region line", bad56.diagnostics.some((d: any) => /Missing '#endregion' for this '#region'/.test(d.message) && d.line === 4));
+
+    // -- #error / #warning directives surface --
+    const err56 = engine.updateFile("__test56__/ErrorDirective.cs", [
+      "public class ErrorDirective",
+      "{",
+      "#error NOT_IMPLEMENTED_YET",
+      "#warning coming soon",
+      "}",
+    ].join("\n"), true);
+    check11("TEST56m #error message surfaces as an error", err56.diagnostics.some((d: any) => d.severity === "error" && d.message.includes("NOT_IMPLEMENTED_YET")));
+    check11("TEST56n #warning message surfaces as a warning", err56.diagnostics.some((d: any) => d.severity === "warning" && d.message.includes("coming soon")));
+
+    // -- #pragma warning disable / restore --
+    engine.updateFile("__test56__/PragmaDemo.cs", [
+      "public class PragmaDemo",
+      "{",
+      "#pragma warning disable CS0168",
+      "    void A() { int unused; }",        // suppressed
+      "#pragma warning restore CS0168",
+      "    void B() { int unused2; }",      // still flagged
+      "}",
+    ].join("\n"), true);
+    const sem56 = engine.semantic("__test56__/PragmaDemo.cs");
+    const unused56 = sem56.diagnostics.filter((d: any) => /never used/.test(d.message));
+    check11("TEST56o pragma-disabled unused var silent, restored one flagged",
+      unused56.length === 1 && unused56[0].line === 5, JSON.stringify(unused56.map((d: any) => d.line)));
+
+    // -- folding ranges --
+    const f56 = fold.computeFoldRanges([
+      "/// <summary>",
+      "/// Player docs.",
+      "/// </summary>",
+      "public class Player : MonoBehaviour",
+      "{",
+      "    #region Movement",
+      "    public void Walk()",
+      "    {",
+      "        transform.position += Vector3.forward;",
+      "    }",
+      "    #endregion",
+      "}",
+    ].join("\n"));
+    const kind56 = (k: string) => f56.find((f) => f.kind === k);
+    check11("TEST56p method fold starts at the SIGNATURE line (7→9)", kind56("method")?.startLine === 6 && kind56("method")?.endLine === 9, JSON.stringify(f56));
+    check11("TEST56q type fold 3→11, region 5→10, doc run 0→2",
+      kind56("type")?.startLine === 3 && kind56("type")?.endLine === 11
+      && kind56("region")?.startLine === 5 && kind56("region")?.endLine === 10
+      && kind56("doc")?.startLine === 0 && kind56("doc")?.endLine === 2);
+    check11("TEST56r #if blocks fold (kind 'if')",
+      fold.computeFoldRanges("#if UNITY_EDITOR\nint a;\n#endif\nint b;\n").some((f) => f.kind === "if" && f.startLine === 0 && f.endLine === 2));
+
+    // -- /// XML documentation skeleton --
+    const doc56 = xmldoc.xmlDocSuggestion([
+      "public class Player : MonoBehaviour",
+      "{",
+      "    ///",
+      "    public void TakeDamage(float amount, GameObject source = null)",
+      "    {",
+      "    }",
+      "}",
+    ], 2);
+    check11("TEST56s /// above method → summary + params, no returns (void)",
+      !!doc56 && doc56.snippet.includes('<param name="amount">') && doc56.snippet.includes('<param name="source">') && !doc56.snippet.includes("<returns>"));
+    check11("TEST56t snippet placeholders unique (summary $1, params $2/$3)",
+      !!doc56 && doc56.snippet.includes('<param name="amount">$2</param>') && doc56.snippet.includes('<param name="source">$3</param>'));
+    const docProp56 = xmldoc.xmlDocSuggestion(["public class A", "{", "    ///", "    public int HP { get; set; }", "}"], 2);
+    check11("TEST56u property → <value> tag", !!docProp56 && docProp56.snippet.includes("<value>"));
+    const docNone56 = xmldoc.xmlDocSuggestion(["using UnityEngine;", ""], 1);
+    check11("TEST56v /// over nothing → no suggestion (never invent)", docNone56 === null);
+
+    // -- regression: demo files still parse clean under the preproc filter --
+    const broken56 = engine.updateFile("Assets/Scripts/BrokenScript.cs", fs.readFileSync(path.join(DEMO, "Assets/Scripts/BrokenScript.cs"), "utf8"), true);
+    check11("TEST56w existing syntax diagnostics still surface (filter alive, not deaf)",
+      broken56.diagnostics.length > 0);
+
+    const failed11 = results11.filter(([, ok]) => !ok);
+    console.log(`\n=========== Phase 11 RESULT: ${results11.length - failed11.length}/${results11.length} PASS ===========`);
+    for (const [name] of failed11) console.log("  FAILED:", name);
+    if (failed11.length) process.exitCode = 2;
+  }
+
   // ---- Phase 9 summary ----
   const failed8 = results8.filter(([, ok]) => !ok);
   console.log(`\n=========== Phase 8 RESULT: ${results8.length - failed8.length}/${results8.length} PASS ===========`);

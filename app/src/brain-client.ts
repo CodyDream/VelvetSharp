@@ -71,7 +71,7 @@ export class BrainClient {
   }
 
   init() { return this.call("init"); }
-  configureProjects(list: any[], asmdefs?: any[]) { return this.call("configureProjects", { list, asmdefs }); }
+  configureProjects(list: any[], asmdefs?: any[], unity?: { version: string; defines: string[] }) { return this.call("configureProjects", { list, asmdefs, unity }); }
   loadFiles(files: { path: string; content: string }[]) { return this.call("loadFiles", { files }); }
   updateFile(path: string, content: string, deep = false) {
     return this.call<UpdateFileResult>("updateFile", { path, content, deep });
@@ -202,6 +202,8 @@ export interface SemanticReport {
   diagnostics: { line: number; col: number; length: number; message: string; severity: string; source: string; fix?: QuickFixDto }[];
   unreachable: SemRange[];
   obsolete: SemRange[];
+  /** Phase 11 — preprocessor-inactive runs (dimmed in the editor) */
+  inactive?: SemRange[];
 }
 /** one file's chunked-sweep result (project-wide Problems bar) */
 export interface SweepResult {

@@ -47,6 +47,8 @@ const handlers: Record<string, (p: any) => any> = {
     engine!.setProjects(p.list ?? []);
     // v0.5.0 — assembly hunting: .asmdef graph gates completions per assembly
     if (p.asmdefs) engine!.setAssemblyGraph(p.asmdefs ?? []);
+    // Phase 11 — Unity editor version + custom scripting defines power #if
+    if (p.unity) engine!.setUnityProjectInfo(p.unity.version ?? "", p.unity.defines ?? []);
     return {
       projects: engine!.projectsSummary(),
       defines: engine!.definesOf(),
