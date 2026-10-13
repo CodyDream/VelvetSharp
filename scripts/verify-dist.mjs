@@ -69,7 +69,7 @@ check("no fragile stock client import", !/@neutralinojs\/lib/.test(js));
 
 // 4c. version system present (bumped every phase — see VERSIONS.md checklist)
 check("version chip (status bar)", /version-chip/.test(js) && js.includes("Phase 11"));
-check("Settings version row (build 11.0.0)", js.includes("11.0.0") && /settings-path/.test(js));
+check("Settings version row (build 11.1.0)", js.includes("11.1.0") && /settings-path/.test(js));
 check("no stale 0.7.1 branding", !js.includes("v0.7.1 —"));
 
 // 4d. Phase 8 features present
@@ -113,7 +113,10 @@ check("Unity project version detection (ProjectVersion.txt)", js.includes("Proje
 check("custom scripting defines detection", js.includes("scriptingDefineSymbols"));
 check("collapse commands in palette", js.includes("View: Collapse by Methods") && js.includes("View: Expand All"));
 check("editor context menu capture wiring", js.includes("setEditorCtxMenu"));
-check("Phase 11 version chip", js.includes("Phase 11") && js.includes("11.0.0"));
+check("Phase 11 version chip", js.includes("Phase 11") && js.includes("11.1.0"));
+// 4h. Phase 11.1 — PR #1 merged: class-aware singleton + extra Unity snippets
+check("class-aware Singleton snippet bundle (PR #1)", js.includes("SingletonPersistent") && js.includes("GizmoSphere") && js.includes("TryGetComponent"));
+check("singleton Awake guard shipped", js.includes("an instance already exists on"));
 
 // 5. no stale references to removed APIs
 check("no defineVelvetTheme remnant (theme system replaced it)", !js.includes("defineVelvetTheme"));

@@ -1,5 +1,5 @@
 ════════════════════════════════════════════════════════════════════
-  VelvetSharp — PHASE 11  ·  portable build (build 11.0.0)
+  VelvetSharp — PHASE 11  ·  portable build (build 11.1.0)
 ════════════════════════════════════════════════════════════════════
 
 VERSION SYSTEM
@@ -14,6 +14,27 @@ QUICK START (portable — nothing installs)
 2. If the exe is NOT in your Unity project folder: click the folder
    chip in the status bar or the welcome button to pick your project.
 3. First open asks for a COLOR THEME — it is remembered from then on.
+
+WHAT'S NEW IN BUILD 11.1.0 (PR #1 merged)
+──────────────────────────────────────────
+▲ THE SINGLETON SNIPPET GOT SMART
+  • Type "singleton" inside a class and the generated code uses YOUR
+    class name — innermost class wins when classes nest.
+  • The Awake is guarded: a second instance WARNS and is not
+    assigned (no more Destroy on duplicates).
+  • OnDestroy clears Instance only when it is really this object,
+    so a rejected duplicate can never wipe the live singleton.
+
+▲ 8 NEW UNITY SNIPPETS (type the name, press Tab)
+  • SingletonPersistent — same guards + DontDestroyOnLoad
+  • OnEnableDisable · TryGetComponent · NullGuard ·
+    RequireComponent · EventAction · Cooldown · GizmoSphere
+
+KNOWN LIMITATION (from the PR, kept honest)
+  • If your class already declares Awake or OnDestroy, the snippet
+    still inserts its own copy — delete the duplicate after
+    expanding. Lifecycle completions already hide existing methods;
+    snippets do not yet.
 
 WHAT'S NEW IN PHASE 11
 ──────────────────────
@@ -72,14 +93,15 @@ Phase 7: self-healing bridge, error popup, disk-backed settings,
 
 VERIFICATION THAT SHIPPED WITH THIS BUILD
 ─────────────────────────────────────────
-• 152 engine assertions — including 23 new Phase 11 tests: define
-  evaluation, inactive-branch suppression (and the dedupe-slot fix),
-  structural directive errors, pragma suppression, folding ranges,
-  /// skeletons — all green.
+• 163 engine assertions — the 152 from Phase 11 plus the 11 new
+  snippet tests (SNIP-a..k: class name injection, Awake guard
+  order, OnDestroy self-check, parse-clean expansions, dependency-
+  graph self-loop) — all green.
 • Compiled-dist feature markers — all green (incl. Phase 11 menu,
-  folding provider, /// completion, dimming, version detection).
+  folding provider, /// completion, dimming, version detection,
+  and the new singleton snippets).
 • CI/CD: GitHub Actions tested every push and builds the release
-  zip automatically on the v11.0.0 tag.
+  zip automatically on the v11.1.0 tag.
 
 TROUBLESHOOTING
 ───────────────
