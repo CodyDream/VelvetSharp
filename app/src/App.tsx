@@ -8,6 +8,7 @@ import { BrainClient, type UpdateFileResult, type SemanticReport, type RenamePla
 import { DepGraphView } from "./depgraph";
 import { parseCsproj } from "@brain/csproj";
 import { parseAsmdef, guidFromMeta } from "@brain/asmdef";
+import { computeFoldRanges } from "@brain/folding";
 import { readCache, writeCache, statFiles, fingerprintChanged, cacheEnabled, CACHE_VERSION } from "./projectCache";
 import { UNITY_LIFECYCLE, UNITY_MESSAGE_NAMES } from "@brain/snippets";
 import { detectEol, convertEol, eolOfMonaco, splitLines, joinLines, type Eol } from "./eol";
@@ -182,8 +183,26 @@ async function loadWorkspace(client: BrainClient) {
     } catch { /* malformed asmdef — skip */ }
   }
 
-  if (csprojInfos.length || asmdefs.length) {
-    const res = await client.configureProjects(csprojInfos, asmdefs);
+  {
+    // Phase 11 — read the Unity project identity so #if sees the right world:
+    //   ProjectSettings/ProjectVersion.txt → UNITY_<major>_<minor>_OR_NEWER chain
+    //   ProjectSettings.asset              → scriptingDefineSymbols custom defines
+    let unityVersion = "";
+    const projectDefines: string[] = [];
+    const settingsDir = files.find((f) => /^projectsettings\//i.test(f));
+    if (settingsDir) {
+      try {
+        const pv = await adapter.read("ProjectSettings/ProjectVersion.txt");
+        const m = /m_EditorVersion(?:WithRevision)?:\s*(.+)/.exec(pv);
+        if (m) unityVersion = m[1].trim();
+      } catch { /* no ProjectVersion.txt — default 2022.3 chain */ }
+      try {
+        const ps = await adapter.read("ProjectSettings/ProjectSettings.asset");
+        const m = /scriptingDefineSymbols:\s*\{[^}]*?1:\s*([^\n}]+)/.exec(ps);
+        if (m) for (const d of m[1].split(";")) { const t = d.trim(); if (t) projectDefines.push(t); }
+      } catch { /* no ProjectSettings.asset — csproj defines only */ }
+    }
+    const res = await client.configureProjects(csprojInfos, asmdefs, { version: unityVersion, defines: projectDefines });
     useStore.getState().setProjects(res.projects, res.defines ?? []);
     if (res.asmdef) {
       useStore.getState().setAsmdefInfo(
@@ -197,6 +216,8 @@ async function loadWorkspace(client: BrainClient) {
     if (asmdefs.length) {
       parts.push(`${asmdefs.length} asmdef${asmdefs.length > 1 ? "s" : ""} hunted${res.asmdef?.unresolved ? ` · ${res.asmdef.unresolved} unresolved GUID ref${res.asmdef.unresolved > 1 ? "s" : ""}` : ""}`);
     }
+    if (unityVersion) parts.push(`Unity ${unityVersion.split(".").slice(0, 2).join(".")} defines`);
+    if (projectDefines.length) parts.push(`+${projectDefines.length} custom define${projectDefines.length > 1 ? "s" : ""}`);
     useStore.getState().setStatus(parts.join(" · "));
   }
 
@@ -462,6 +483,19 @@ function applySemanticDecorations(ed: any) {
         },
       });
     }
+    // Phase 11 — dim preprocessor-inactive branches (VS grays false #if code;
+    // the brain already suppresses diagnostics inside them)
+    for (const r of report.inactive ?? []) {
+      next.push({
+        range: new monaco.Range(r.line + 1, 1, r.endLine + 1, 1),
+        options: {
+          isWholeLine: true,
+          className: "vs-inactive-line",
+          hoverMessage: { value: "Inactive — preprocessor condition is false for this context" },
+          stickiness: monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
+        },
+      });
+    }
   }
   try {
     decorationsByPath.set(modelPath, ed.deltaDecorations(olds, next));
@@ -588,6 +622,7 @@ function App() {
       <ThemePicker />
       <RenameWidget />
       <ExplorerCtxMenu />
+      <EditorCtxMenu />
       <ErrorPopup />
       <SettingsModal />
     </div>
@@ -1083,6 +1118,189 @@ function closeGraphAction() {
   st.closeGraph();
   const remaining = st.tabs.filter((t) => t.path !== "__graph__");
   if (st.active === "__graph__") st.setActive(remaining[remaining.length - 1]?.path ?? null);
+}
+
+/* ------------------- Phase 11 — editor right-click + Collapse ▸ -------------------
+ *  "when right click script so my collaspe option and it sub option give
+ *  collaspe option for collaspe by methods, collaspe by #regions, collaspe all
+ *  options, and also collaspe xml documentation on top of methods and stuff"
+ *
+ *  The submenu folds precisely: the folding provider computes VS-style ranges
+ *  (methods fold from the SIGNATURE line), so each option folds exactly the
+ *  ranges of its kind in ONE Monaco command: editor.fold { selectionLines }. */
+
+function foldRangesOfKinds(kinds: string[]): number[] {
+  const ed = (window as any).__editor;
+  const model = ed?.getModel?.();
+  if (!ed || !model) return [];
+  try {
+    const ranges = computeFoldRanges(model.getValue());
+    return [...new Set(ranges.filter((r) => kinds.includes(r.kind)).map((r) => r.startLine))].sort((a, b) => a - b);
+  } catch { return []; }
+}
+
+function collapseByKinds(kinds: string[], label: string): void {
+  const ed = (window as any).__editor;
+  if (!ed) return;
+  const lines = foldRangesOfKinds(kinds);
+  if (!lines.length) {
+    useStore.getState().setStatus(`collapse ${label}: nothing to collapse in this script`);
+    return;
+  }
+  try {
+    // Monaco's fold command accepts the 0-based start lines of every region to
+    // collapse in one call — no per-region flicker
+    ed.trigger("velvetsharp", "editor.fold", { selectionLines: lines });
+    useStore.getState().setStatus(`collapsed ${lines.length} ${label}${lines.length === 1 ? "" : "s"}`);
+  } catch {
+    useStore.getState().setStatus("collapse failed — try again");
+  }
+}
+
+function collapseAll(): void {
+  const ed = (window as any).__editor;
+  if (!ed) return;
+  try { ed.trigger("velvetsharp", "editor.foldAll"); useStore.getState().setStatus("collapsed everything foldable"); }
+  catch { /* best-effort */ }
+}
+
+function expandAll(): void {
+  const ed = (window as any).__editor;
+  if (!ed) return;
+  try { ed.trigger("velvetsharp", "editor.unfoldAll"); useStore.getState().setStatus("expanded all"); }
+  catch { /* best-effort */ }
+}
+
+async function copyEditorSelection(): Promise<void> {
+  const ed = (window as any).__editor;
+  const model = ed?.getModel?.();
+  const sel = ed?.getSelection?.();
+  if (!ed || !model || !sel) return;
+  const text = model.getValueInRange(sel) ?? "";
+  let ok = false;
+  try { await navigator.clipboard.writeText(text); ok = true; } catch { /* fall through */ }
+  if (!ok) {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+    } catch { ok = false; }
+  }
+  useStore.getState().setStatus(ok ? "copied selection" : "copy failed");
+}
+
+async function pasteIntoEditor(): Promise<void> {
+  const ed = (window as any).__editor;
+  const model = ed?.getModel?.();
+  if (!ed || !model) return;
+  let text = "";
+  try { text = await navigator.clipboard.readText(); } catch { /* denied / unsupported */ }
+  if (!text) {
+    useStore.getState().setStatus("clipboard empty or unavailable");
+    return;
+  }
+  const sel = ed.getSelection();
+  ed.executeEdits("velvetsharp.paste", [{ range: sel ?? undefined, text, paste: true } as any]);
+  ed.focus();
+  useStore.getState().setStatus("pasted");
+}
+
+function goToDefinitionFromMenu(): void {
+  const ed = (window as any).__editor;
+  navPush(currentMark());
+  try { ed?.getAction?.("editor.action.revealDefinition")?.run?.(); } catch { /* best-effort */ }
+}
+
+/** the editor's own right-click menu (Phase 11) — mirrors ExplorerCtxMenu styling */
+function EditorCtxMenu() {
+  const menu = useStore((s) => s.editorCtxMenu);
+  const [subOpen, setSubOpen] = useState(false);
+  useEffect(() => { setSubOpen(false); }, [menu?.x, menu?.y]);
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => useStore.getState().setEditorCtxMenu(null);
+    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
+    const t = setTimeout(() => {
+      window.addEventListener("mousedown", close, { once: true });
+      window.addEventListener("contextmenu", close, { once: true });
+      window.addEventListener("resize", close);
+      window.addEventListener("keydown", esc);
+    }, 0);
+    return () => {
+      clearTimeout(t);
+      window.removeEventListener("mousedown", close);
+      window.removeEventListener("contextmenu", close);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("keydown", esc);
+    };
+  }, [menu?.x, menu?.y]);
+  if (!menu) return null;
+
+  const close = () => useStore.getState().setEditorCtxMenu(null);
+  const run = (fn: () => void | Promise<void>) => { close(); void fn(); };
+  const W = 258, H = 380;
+  const style: React.CSSProperties = {
+    left: Math.max(8, Math.min(menu.x, window.innerWidth - W - 8)),
+    top: Math.max(8, Math.min(menu.y, window.innerHeight - H - 8)),
+  };
+
+  return (
+    <div className="ctx-layer" onMouseDown={close} onContextMenu={(e) => { e.preventDefault(); close(); }}>
+      <div className="ctx-menu" style={style} onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
+        <div className="ctx-item" onClick={() => run(goToDefinitionFromMenu)}>
+          <span className="ctx-glyph">→</span> Go to Definition <span className="ctx-key">F12</span>
+        </div>
+        <div className="ctx-item" onClick={() => run(() => (window as any).__requestUses?.())}>
+          <span className="ctx-glyph">◈</span> Find All Uses <span className="ctx-key">Shift+F12</span>
+        </div>
+        <div className="ctx-item" onClick={() => run(() => { void startRename(); })}>
+          <span className="ctx-glyph">✎</span> Rename Symbol <span className="ctx-key">F2</span>
+        </div>
+        <div className="ctx-sep" />
+        <div className="ctx-item" onClick={() => run(() => { void copyEditorSelection(); })}>
+          <span className="ctx-glyph">⧉</span> Copy
+        </div>
+        <div className="ctx-item" onClick={() => run(() => { void pasteIntoEditor(); })}>
+          <span className="ctx-glyph">⎘</span> Paste
+        </div>
+        <div className="ctx-sep" />
+        <div
+          className={"ctx-item has-sub" + (subOpen ? " open" : "")}
+          onMouseEnter={() => setSubOpen(true)}
+          onMouseLeave={() => setSubOpen(false)}
+          onClick={() => setSubOpen((v) => !v)}
+        >
+          <span className="ctx-glyph">▾</span> Collapse <span className="ctx-key">▸</span>
+          {subOpen && (
+            <div className="ctx-submenu" onClick={(e) => e.stopPropagation()}>
+              <div className="ctx-item" onClick={() => run(() => collapseByKinds(["method"], "methods"))}>
+                <span className="ctx-glyph">ƒ</span> Collapse by Methods
+              </div>
+              <div className="ctx-item" onClick={() => run(() => collapseByKinds(["region"], "#regions"))}>
+                <span className="ctx-glyph">#</span> Collapse by #Regions
+              </div>
+              <div className="ctx-item" onClick={() => run(() => collapseByKinds(["if"], "#if blocks"))}>
+                <span className="ctx-glyph">⚑</span> Collapse by #if Blocks
+              </div>
+              <div className="ctx-item" onClick={() => run(() => collapseByKinds(["doc"], "XML doc comments"))}>
+                <span className="ctx-glyph">///</span> Collapse XML Doc Comments
+              </div>
+              <div className="ctx-sep" />
+              <div className="ctx-item" onClick={() => run(collapseAll)}>
+                <span className="ctx-glyph">⊟</span> Collapse All
+              </div>
+              <div className="ctx-item" onClick={() => run(expandAll)}>
+                <span className="ctx-glyph">⊞</span> Expand All
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="ctx-note">{useStore.getState().active ?? ""}</div>
+      </div>
+    </div>
+  );
 }
 
 /* ------------------------- workspace opening ------------------------- */
@@ -1729,8 +1947,23 @@ function EditorArea() {
         padding: { top: 10 },
         scrollBeyondLastLine: false,
         stickyScroll: { enabled: true },
+        // Phase 11 — /// suggestion accepts on Enter ("typed and enter"), and
+        // the fold gutter is always visible next to the new folding provider
+        acceptSuggestionOnEnter: "on",
+        showFoldingControls: "always",
       });
       (window as any).__editor = edRef.current;
+
+      // Phase 11 — editor right-click opens the VelvetSharp menu with the
+      // Collapse submenu. The listener is registered on the CONTAINER (an
+      // ancestor of Monaco's DOM) in the CAPTURE phase, so it wins against
+      // Monaco's own context-menu controller no matter where inside the
+      // editor the user right-clicked (target-phase listeners run later).
+      el.addEventListener("contextmenu", (e: MouseEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        useStore.getState().setEditorCtxMenu({ x: e.clientX, y: e.clientY });
+      }, true);
       edRef.current.onDidChangeCursorPosition((e: any) => {
         const el2 = document.getElementById("cursor-pos");
         if (el2) el2.textContent = `Ln ${e.position.lineNumber}, Col ${e.position.column}`;
@@ -1849,6 +2082,8 @@ function EditorArea() {
             <li><b>Ctrl+Shift+F</b> search · <b>F12</b> go to definition · <b>F2</b> rename symbol project-wide · <b>Alt+Left/Right</b> navigate back/forward · <b>Ctrl+Wheel</b> zoom</li>
             <li>Select any method/variable → the <b>uses panel</b> shows every place it is used and where it comes from</li>
             <li><b>⚡ Call Flow</b> (graph view, or Ctrl+Shift+P → "Call Flow") — how one script's methods call each other; outside calls end as dashed terminals</li>
+            <li><b>#if UNITY_EDITOR</b> and friends are first-class: false branches dim, <b>#pragma warning</b> is honored, right-click → <b>Collapse ▸</b> folds methods/regions/docs</li>
+            <li>Type <code>///</code> above a method and press <b>Enter</b> — the XML documentation skeleton inserts itself</li>
             <li><b>⬡</b> dependency graph — left-click the ⬡ on a folder or right-click it (4 layouts)</li>
             <li>Type <code>transform.</code>, <code>rb.</code>, or <code>Aw</code> in a class body to feel the brain</li>
             <li>Unity messages (<b>Awake / Start / Update</b>) complete at class member level</li>
@@ -2072,6 +2307,12 @@ function Palette() {
     } },
     { label: "Refactor: Rename Symbol (F2)", run: () => void startRename() },
     { label: "References: Find All Uses of Symbol (Shift+F12)", run: () => (window as any).__requestUses?.() },
+    // Phase 11 — collapse commands (right-click menu has the full submenu)
+    { label: "View: Collapse by Methods", run: () => collapseByKinds(["method"], "methods") },
+    { label: "View: Collapse by #Regions", run: () => collapseByKinds(["region"], "#regions") },
+    { label: "View: Collapse XML Doc Comments", run: () => collapseByKinds(["doc"], "XML doc comments") },
+    { label: "View: Collapse All", run: collapseAll },
+    { label: "View: Expand All", run: expandAll },
     // Phase 10 — navigation history
     { label: "Navigate: Go Back (Alt+Left)", run: () => navGo(-1) },
     { label: "Navigate: Go Forward (Alt+Right)", run: () => navGo(1) },

@@ -324,6 +324,12 @@ body {
   text-decoration-color: #ff5c7ab0;
   opacity: 0.8;
 }
+/* Phase 11 — preprocessor-inactive branch (a false #if): dimmed like VS.
+   Whole-line decoration — the brain already suppresses its diagnostics. */
+.vs-inactive-line {
+  opacity: 0.42;
+  font-style: italic;
+}
 
 /* ---------------- problems bar (v0.5.0) ---------------- */
 .problems {
@@ -545,6 +551,24 @@ button.err-count {
 .ctx-glyph { color: var(--accent2); }
 .ctx-sub { color: var(--hint-text); font-size: 10.5px; flex-basis: 100%; padding-left: 21px; }
 .ctx-note { color: var(--faint-text); font-size: 10px; padding: 4px 9px 2px; overflow: hidden; text-overflow: ellipsis; }
+
+/* Phase 11 — editor right-click menu: key hints + the Collapse submenu */
+.ctx-key {
+  margin-left: auto; color: var(--faint-text); font-size: 10px;
+  border: 1px solid var(--border); border-radius: 3px; padding: 0 4px;
+}
+.ctx-item.has-sub { position: relative; }
+.ctx-item.has-sub > .ctx-key { color: var(--accent2); }
+.ctx-submenu {
+  position: absolute; left: calc(100% - 4px); top: -6px; min-width: 236px;
+  background: var(--widget-bg); border: 1px solid var(--widget-border);
+  border-radius: 7px; padding: 5px; box-shadow: 0 10px 30px rgba(0,0,0,.55);
+  z-index: 71;
+}
+.ctx-item.has-sub.open > .ctx-key { border-color: var(--accent2); }
+.ctx-item.has-sub:not(.open) > .ctx-submenu { display: none; }
+.ctx-submenu .ctx-item { white-space: nowrap; }
+.ctx-submenu .ctx-sep { height: 1px; background: var(--border); margin: 4px 2px; }
 .dir-graph {
   margin-left: auto; color: var(--faint-text); opacity: 0; cursor: pointer; font-size: 12px;
   padding: 0 4px; border-radius: 3px; transition: opacity .1s;

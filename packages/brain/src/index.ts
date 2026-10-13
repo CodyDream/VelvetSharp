@@ -6,3 +6,6 @@ export * from "./snippets";
 export * from "./engine";
 export * from "./csproj";
 export * from "./semantic";
+export * from "./preproc";
+export * from "./folding";
+export * from "./xmldoc";

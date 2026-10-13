@@ -68,8 +68,8 @@ check("config hydration at boot", /hydrateConfigFromDisk/.test(js));
 check("no fragile stock client import", !/@neutralinojs\/lib/.test(js));
 
 // 4c. version system present (bumped every phase — see VERSIONS.md checklist)
-check("version chip (status bar)", /version-chip/.test(js) && js.includes("Phase 10"));
-check("Settings version row (build 10.0.0)", js.includes("10.0.0") && /settings-path/.test(js));
+check("version chip (status bar)", /version-chip/.test(js) && js.includes("Phase 11"));
+check("Settings version row (build 11.0.0)", js.includes("11.0.0") && /settings-path/.test(js));
 check("no stale 0.7.1 branding", !js.includes("v0.7.1 —"));
 
 // 4d. Phase 8 features present
@@ -100,7 +100,20 @@ check("Alt+Left/Right keybinding registered", /ArrowLeft/.test(js) && /ArrowRigh
 check("Ctrl+Wheel editor zoom", js.includes("mouseWheelZoom"));
 check("graph load-error state (no silent blank)", js.includes("graph failed to load"));
 check("non-passive graph wheel listener", js.includes("wheel") && !js.includes("onWheel"));
-check("Phase 10 version chip", js.includes("Phase 10") && js.includes("10.0.0"));
+
+// 4g. Phase 11 features present
+check("editor right-click menu with Collapse submenu", js.includes("Collapse by Methods") && js.includes("Collapse by #Regions") && js.includes("Collapse All") && js.includes("Expand All"));
+check("XML doc comments collapse option", js.includes("Collapse XML Doc Comments"));
+check("folding range provider registered", js.includes("FoldingRangeKind.Region") && js.includes("FoldingRangeKind.Comment"));
+check("/// XML documentation completion", js.includes("/// XML documentation"));
+check("Enter accepts suggestions (typed + Enter)", js.includes("acceptSuggestionOnEnter"));
+check("inactive branch dimming decoration", /vs-inactive-line/.test(js));
+check("preprocessor full-line directive color", js.includes("\\w+.*$") && js.includes("preprocessor"));
+check("Unity project version detection (ProjectVersion.txt)", js.includes("ProjectVersion.txt") && js.includes("m_EditorVersion"));
+check("custom scripting defines detection", js.includes("scriptingDefineSymbols"));
+check("collapse commands in palette", js.includes("View: Collapse by Methods") && js.includes("View: Expand All"));
+check("editor context menu capture wiring", js.includes("setEditorCtxMenu"));
+check("Phase 11 version chip", js.includes("Phase 11") && js.includes("11.0.0"));
 
 // 5. no stale references to removed APIs
 check("no defineVelvetTheme remnant (theme system replaced it)", !js.includes("defineVelvetTheme"));

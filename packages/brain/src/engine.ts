@@ -14,6 +14,7 @@ import {
   type AssemblyGraph, type AsmdefInfo,
 } from "./asmdef";
 import { semanticAnalysis } from "./diagnostics";
+import { scanPreproc, buildDefineSet, type PreprocScan } from "./preproc";
 import { buildDependencyGraph } from "./deps";
 import { symbolAt, computeRename, findSymbolUses, type SymbolUsesResult } from "./rename";
 import { buildCallFlow, type CallFlowResult } from "./callflow";
@@ -59,6 +60,12 @@ export class VelvetSharpEngine {
   private assemblyByFile = new Map<string, string>();
   /** union of all detected csproj DefineConstants */
   readonly defines = new Set<string>();
+  /** Phase 11 — Unity editor version from ProjectSettings/ProjectVersion.txt
+   *  (drives the UNITY_<major>_<minor>_OR_NEWER symbol chain) */
+  private unityVersion = "";
+  /** Phase 11 — project custom defines (ProjectSettings scriptingDefineSymbols
+   *  + any extra sources); unioned with csproj DefineConstants for #if */
+  private unityDefines = new Set<string>();
   /** v0.5.0 — .asmdef reference graph (assembly hunting + completion scoping) */
   private asmGraph: AssemblyGraph | null = null;
   private asmInfo: AsmdefInfo[] = [];
@@ -99,13 +106,16 @@ export class VelvetSharpEngine {
     const symbols = extractFileSymbols(this.h, path, content, tree);
     const diagnostics = extractDiagnostics(tree);
     diagnostics.push(...this.extraLints(content, symbols));
+    // Phase 11 — preprocessor: structural directive diagnostics, inactive-branch
+    // suppression for syntax/lints, inactive ranges for the editor's dimming
+    const pre = this.preprocPass(content, diagnostics);
     this.files.set(path, { content, tree, symbols, version: (prev?.version ?? 0) + 1 });
     // incremental index update — only this file's old contributions are removed (was: full rebuild)
     this.reindexFile(path, prev?.symbols ?? null, symbols);
     this.stats.files = this.files.size;
     let sem: SemanticReport | undefined;
     if (deep) {
-      try { sem = semanticAnalysis(this, this.files.get(path)!, tree, content, path); } catch { /* semantic is best-effort */ }
+      try { sem = semanticAnalysis(this, this.files.get(path)!, tree, content, path, pre); } catch { /* semantic is best-effort */ }
     }
     return { symbols, diagnostics, parseMs: Math.round(performance.now() - t0), sem };
   }
@@ -162,7 +172,9 @@ export class VelvetSharpEngine {
     if (!st || !st.tree) return null;
     const syntax = extractDiagnostics(st.tree);
     syntax.push(...this.extraLints(st.content, st.symbols));
-    const sem = semanticAnalysis(this, st, st.tree, st.content, path);
+    // Phase 11 — preprocessor filter + structural diagnostics (same as updateFile)
+    const pre = this.preprocPass(st.content, syntax);
+    const sem = semanticAnalysis(this, st, st.tree, st.content, path, pre);
     return { syntax, sem };
   }
 
@@ -345,6 +357,43 @@ export class VelvetSharpEngine {
 
   definesOf(): string[] {
     return [...this.defines];
+  }
+
+  /** Phase 11 — register the Unity editor version (e.g. "2022.3.41f1") read by
+   *  the app from ProjectSettings/ProjectVersion.txt. Powers the
+   *  UNITY_<major>_<minor>_OR_NEWER chain used by #if evaluation. */
+  setUnityVersion(version: string): void {
+    this.unityVersion = (version ?? "").trim();
+  }
+
+  /** Phase 11 — project-level Unity info: editor version + custom scripting
+   *  defines (ProjectSettings.asset scriptingDefineSymbols). Custom defines
+   *  survive csproj re-config (setProjects clears only ITS OWN define set). */
+  setUnityProjectInfo(version: string, customDefines: string[]): void {
+    this.unityVersion = (version ?? "").trim();
+    this.unityDefines.clear();
+    for (const d of customDefines ?? []) {
+      const t = (d ?? "").trim();
+      if (/^[A-Za-z_]\w*$/.test(t)) this.unityDefines.add(t);
+    }
+  }
+
+  /** Phase 11 — the effective pre-defined symbol set for #if evaluation:
+   *  Unity base set + version chain + csproj/scriptingDefineSymbols custom set */
+  preprocDefines(): Set<string> {
+    return buildDefineSet([...this.defines, ...this.unityDefines], this.unityVersion);
+  }
+
+  /** Phase 11 — run the directive scanner and produce the file's preproc view:
+   *  structural diagnostics + inactive runs, with syntax/extra lints filtered
+   *  to active lines (VS parity: an inactive branch is not compiled). */
+  private preprocPass(content: string, diagnostics: Diagnostic[]): PreprocScan {
+    const scan = scanPreproc(content, this.preprocDefines());
+    const isActive = (line: number) => line < scan.active.length && scan.active[line] === 1;
+    const kept = diagnostics.filter((d) => isActive(d.line));
+    diagnostics.length = 0;
+    diagnostics.push(...kept, ...scan.diagnostics);
+    return scan;
   }
 
   /** project the file belongs to (per csproj Compile items) */
@@ -1330,7 +1379,11 @@ export class VelvetSharpEngine {
     const workSt: FileState = st && st.content === effective
       ? st
       : { content: effective, tree, symbols: st?.symbols ?? { path, usings: [], namespaces: [], types: [], members: [], typeRefs: [] }, version: st?.version ?? 0 };
-    return semanticAnalysis(this, workSt, tree, effective, path);
+    // Phase 11 — the semantic() RPC is also preproc-aware (inactive suppression,
+    // pragma, inactive ranges). Structural directive diagnostics already flow
+    // through updateFile/sweepFile; semantic() only returns the semantic report.
+    const pre = scanPreproc(effective, this.preprocDefines());
+    return semanticAnalysis(this, workSt, tree, effective, path, pre);
   }
 
   /* ------------------- v0.6.0 — dependency graph + rename ------------------- */

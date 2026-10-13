@@ -5,6 +5,8 @@ import * as monacoApi from "monaco-editor/editor/editor.main.js";
 import EditorWorker from "./editor-worker.ts?worker";
 import { CS_MONARCH, CS_LANGUAGE_CONFIG, CSHARP_LANG } from "./cs-monarch";
 import { SEMANTIC_TOKEN_TYPES, SEMANTIC_TOKEN_MODIFIERS } from "@brain/semantic";
+import { computeFoldRanges } from "@brain/folding";
+import { xmlDocForSource } from "@brain/xmldoc";
 import type { BrainClient } from "./brain-client";
 import { defineAllThemes, applyTheme, getSavedThemeId, DEFAULT_THEME } from "./themes";
 import { eolOfMonaco, convertEol } from "./eol";
@@ -24,6 +26,28 @@ export function ensureLanguage() {
   monaco.languages.register({ id: CSHARP_LANG });
   monaco.languages.setMonarchTokensProvider(CSHARP_LANG, CS_MONARCH as any);
   monaco.languages.setLanguageConfiguration(CSHARP_LANG, CS_LANGUAGE_CONFIG as any);
+
+  // Phase 11 — precise folding ranges power BOTH the gutter arrows and the
+  // right-click Collapse submenu: member bodies fold from the SIGNATURE line
+  // (VS/Rider behaviour), plus #region / #if / doc comments / block comments.
+  // Registering a provider replaces Monaco's indentation-based ranges.
+  monaco.languages.registerFoldingRangeProvider(CSHARP_LANG, {
+    provideFoldingRanges(model) {
+      try {
+        return computeFoldRanges(model.getValue()).map((r) => ({
+          start: r.startLine + 1,
+          end: r.endLine + 1,
+          kind: r.kind === "region" || r.kind === "if"
+            ? monaco.languages.FoldingRangeKind.Region
+            : r.kind === "doc" || r.kind === "comment"
+              ? monaco.languages.FoldingRangeKind.Comment
+              : undefined,
+        }));
+      } catch {
+        return [];
+      }
+    },
+  });
 }
 
 let KIND_MAP: Record<string, monaco.languages.CompletionItemKind> | null = null;
@@ -139,7 +163,23 @@ function dedupeItems(primary: RawItem[], fallback: RawItem[]): RawItem[] {
   return out;
 }
 
+let activeClient: BrainClient | null = null;
+
 async function provideCompletionImpl(model: any, position: any): Promise<{ suggestions: monaco.languages.CompletionItem[] }> {
+  // Phase 11 — `///` above a member offers the XML documentation skeleton
+  // (typed + Enter inserts <summary>/<param>/<returns> with tab stops).
+  // Intercepted BEFORE everything else so the widget is instant and stable.
+  const docSnippet = docCommentSuggestion(model, position);
+  if (docSnippet) return docSnippet;
+
+  // Phase 11 latent-bug fix: this module-level function referenced `client`,
+  // which only existed as registerProviders' parameter — at runtime the
+  // provider threw ReferenceError and the try/catch swallowed it into an
+  // empty suggestion list. The registered client now lives in activeClient
+  // (with the boot() window hook as a belt-and-braces fallback).
+  const client = activeClient ?? ((window as any).__client as BrainClient | null);
+  if (!client) return { suggestions: [] };
+
   const line = position.lineNumber - 1;
   const col = position.column - 1;
   const path = pathOf(model);
@@ -177,11 +217,13 @@ async function provideCompletionImpl(model: any, position: any): Promise<{ sugge
 }
 
 export function registerProviders(client: BrainClient) {
+  activeClient = client;
   monaco.languages.registerCompletionItemProvider(CSHARP_LANG, {
     // Phase 10: plain space removed — it fired a request after EVERY finished
     // word and popped the widget with the whole universe (a "not consistent"
     // complaint); quickSuggestions handles typing naturally.
-    triggerCharacters: [".", "[", "@", "("],
+    // Phase 11: "/" triggers the /// XML documentation skeleton.
+    triggerCharacters: [".", "[", "@", "(", "/"],
     async provideCompletionItems(model, position) {
       try {
         return await provideCompletionImpl(model, position);
@@ -318,6 +360,41 @@ export function registerQuickFixes(getDiags: (path: string) => { line: number; c
 
 function pathOf(model: monaco.editor.ITextModel): string {
   return decodeURIComponent(model.uri.path).replace(/^\//, "");
+}
+
+/* ---------------- Phase 11 — /// XML documentation completion ----------------
+ *  VS parity: type /// on the empty line above a member → a completion offers
+ *  the doc skeleton; Enter inserts <summary> (+ <param> per parameter,
+ *  <returns> for non-void, <value> for properties) with tab stops.
+ *  Pure text scan — no worker round-trip, so it never "does not pop". */
+function docCommentSuggestion(model: any, position: any): { suggestions: monaco.languages.CompletionItem[] } | null {
+  try {
+    const lineText: string = model.getLineContent(position.lineNumber) ?? "";
+    // fires only when the line IS the just-typed /// (whitespace before is ok)
+    if (!/^\s*\/\/\/\s*$/.test(lineText)) return null;
+    const src: string = model.getValue();
+    const doc = xmlDocForSource(src, position.lineNumber - 1);
+    if (!doc) return null;
+    const eol = eolOfMonaco(model);
+    const indent = (lineText.match(/^\s*/) ?? [""])[0];
+    // keep the typed indentation on every skeleton line
+    const body = doc.snippet.split("\n").map((l) => indent + l).join("\n");
+    return {
+      suggestions: [{
+        label: "/// XML documentation",
+        kind: monaco.languages.CompletionItemKind.Snippet,
+        detail: `${doc.kind} ${doc.memberName} — insert <summary>${doc.kind === "method" || doc.kind === "constructor" || doc.kind === "indexer" ? "/<param>" : ""}${doc.kind === "method" || doc.kind === "indexer" ? "/<returns>" : ""}${doc.kind === "property" ? "/<value>" : ""}`,
+        insertText: convertEol(body, eol),
+        insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+        range: new monaco.Range(position.lineNumber, 1, position.lineNumber, position.column),
+        sortText: "0000",
+        filterText: "///",
+        preselect: true,
+      }],
+    };
+  } catch {
+    return null;
+  }
 }
 
 /** a completion item as the brain (and the local fast path) emit it */

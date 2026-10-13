@@ -5,6 +5,7 @@
 import type { SyntaxNode, Tree } from "web-tree-sitter";
 import type { VelvetSharpEngine } from "./engine";
 import type { Diagnostic, SemRange, SemanticReport } from "./types";
+import { pragmaSuppresses, type PreprocScan } from "./preproc";
 
 const MAX_SEMANTIC_DIAGNOSTICS = 120;
 
@@ -25,9 +26,20 @@ interface Ctx {
   unreachable: SemRange[];
   obsolete: SemRange[];
   content: string;
+  /** Phase 11 — directive scan (when present, inactive lines never emit and
+   *  never consume dedupe slots — see checkTypeUsings) */
+  pre?: PreprocScan;
 }
 
-function warn(ctx: Ctx, n: SyntaxNode, message: string, length?: number): void {
+/** Phase 11 — is this node on an ACTIVE preprocessor line? */
+function onActiveLine(ctx: Ctx, n: SyntaxNode): boolean {
+  const pre = ctx.pre;
+  if (!pre) return true;
+  const line = n.startPosition.row;
+  return line >= pre.active.length || pre.active[line] === 1;
+}
+
+function warn(ctx: Ctx, n: SyntaxNode, message: string, length?: number, code?: string): void {
   if (ctx.diags.length >= MAX_SEMANTIC_DIAGNOSTICS) return;
   ctx.diags.push({
     line: n.startPosition.row,
@@ -36,6 +48,7 @@ function warn(ctx: Ctx, n: SyntaxNode, message: string, length?: number): void {
     message,
     severity: "warning",
     source: "velvetsharp.semantic",
+    ...(code ? { code } : {}),
   });
 }
 
@@ -60,8 +73,8 @@ const rangeOf = (n: SyntaxNode): SemRange => ({
 
 /* ------------------------------ entry point ------------------------------ */
 
-export function semanticAnalysis(engine: VelvetSharpEngine, st: any, tree: Tree, content: string, path: string): SemanticReport {
-  const ctx: Ctx = { engine, path, st, diags: [], unreachable: [], obsolete: [], content };
+export function semanticAnalysis(engine: VelvetSharpEngine, st: any, tree: Tree, content: string, path: string, pre?: PreprocScan): SemanticReport {
+  const ctx: Ctx = { engine, path, st, diags: [], unreachable: [], obsolete: [], content, pre };
   const root = tree.rootNode;
   if (root.endIndex > 1_200_000) return { diagnostics: [], unreachable: [], obsolete: [] };
 
@@ -74,7 +87,27 @@ export function semanticAnalysis(engine: VelvetSharpEngine, st: any, tree: Tree,
   checkInterfaceNaming(ctx, root);
   checkTypeUsings(ctx, root);
 
+  // Phase 11 — preprocessor contract: VS/Rider never surface diagnostics from
+  // an inactive conditional branch (a false #if branch is not compiled), and
+  // `#pragma warning disable` silences the warnings it names.
+  if (pre) {
+    const isActive = (line: number) => line < pre.active.length && pre.active[line] === 1;
+    const suppressed = (d: Diagnostic) =>
+      !isActive(d.line)
+      || (d.severity === "warning" && !!d.code && pragmaSuppressesSafe(pre, d.line, d.code));
+    const report: SemanticReport = {
+      diagnostics: ctx.diags.filter((d) => !suppressed(d)),
+      unreachable: ctx.unreachable.filter((r) => isActive(r.line)),
+      obsolete: ctx.obsolete.filter((r) => isActive(r.line)),
+      inactive: pre.inactive,
+    };
+    return report;
+  }
   return { diagnostics: ctx.diags, unreachable: ctx.unreachable, obsolete: ctx.obsolete };
+}
+
+function pragmaSuppressesSafe(pre: PreprocScan, line: number, code: string): boolean {
+  try { return pragmaSuppresses(pre.pragma, line, code); } catch { return false; }
 }
 
 /* --------------------------- unreachable code --------------------------- */
@@ -106,7 +139,7 @@ function checkUnreachable(ctx: Ctx, root: SyntaxNode): void {
           endLine: runEnd.endPosition.row,
           endCol: runEnd.endPosition.column,
         });
-        warn(ctx, runStart, "Unreachable code detected", Math.max(1, runEnd.endIndex - runStart.startIndex));
+        warn(ctx, runStart, "Unreachable code detected", Math.max(1, runEnd.endIndex - runStart.startIndex), "CS0162");
       }
     }
     for (let i = 0; i < n.childCount; i++) {
@@ -267,12 +300,14 @@ function checkUnusedLocals(ctx: Ctx, root: SyntaxNode): void {
       const reads = countReads(scope, nameN, name);
       if (reads === 0) {
         const writes = countWrites(scope, nameN, name);
+        const msg = writes > 0
+          ? `Variable '${name}' is assigned but its value is never used`
+          : `Variable '${name}' is declared but never used`;
         warn(
           ctx, nameN,
-          writes > 0
-            ? `Variable '${name}' is assigned but its value is never used`
-            : `Variable '${name}' is declared but never used`,
+          msg,
           name.length,
+          writes > 0 ? "CS0219" : "CS0168",
         );
       }
     }
@@ -477,6 +512,7 @@ function reportObsolete(ctx: Ctx, n: SyntaxNode, full: string, msg: string): voi
     ctx, n,
     `'${label}' is obsolete${msg ? ": " + msg : ""}`,
     Math.max(1, n.endIndex - n.startIndex),
+    "CS0618",
   );
 }
 
@@ -577,6 +613,10 @@ function checkTypeUsings(ctx: Ctx, root: SyntaxNode): void {
 
   for (const id of root.descendantsOfType("identifier")) {
     if (ctx.diags.length >= MAX_SEMANTIC_DIAGNOSTICS) break;
+    // Phase 11 — identifiers in an INACTIVE branch are skipped BEFORE the
+    // dedupe bookkeeping: otherwise the first (inactive) occurrence consumes
+    // the name's slot and the active occurrence stays silent after filtering
+    if (!onActiveLine(ctx, id)) continue;
     if (!isTypePosition(id)) continue;
     const name = id.text;
     if (!name || name.length > 64) continue;

@@ -19,14 +19,16 @@
 
 | **10** | **10.0.0** | **2026-10-13** | **Call-flow stability + vertical flowchart + solid completions + navigation history** (user reports fixed): call-flow graph no longer crashes/blanks — walk cap raised (4000 raw edges) with **connectivity-ranked node selection** (a big script keeps its helpers instead of a wall of isolated callers — 400/400 edges vs 60 before), engine callFlow wrapped (readable empty state, never a dead RPC), graph load-error UI + safe flow mapper + debounced index-refresh + non-passive wheel listener; **new Vertical layout** — tidy-tree flowchart (sources on top, calls flow down, each branch owns a column) auto-selected in Call Flow mode and available in Types mode, layering made iterative (stack-overflow proof) + unbreakable grid backstop; **completions always pop** — instant same-file member fast path (methods/fields/props scanned synchronously) raced against the brain with stale-while-revalidate caching, space trigger removed; **QoL: navigation history** — Alt+Left/Right Go Back/Forward across F12/search/problems/outline/graph jumps + Ctrl+Wheel editor zoom. Verified: 139 engine (8 new Phase 10) + dist markers + visual E2E |
 
+| **11** | **11.0.0** | **2026-10-13** | **Preprocessor directives are first-class + right-click Collapse submenu + /// XML doc generation** (user request): `#if UNITY_EDITOR` & friends understood end-to-end — Unity's full standard define set (all platforms + editor flags, matching generated .csproj constants) + `UNITY_<major>_<minor>_OR_NEWER` chain derived from ProjectSettings/ProjectVersion.txt + custom `scriptingDefineSymbols` from ProjectSettings.asset; false branches go INACTIVE like VS (dimmed in the editor, diagnostics suppressed — including the dedupe-slot fix so an inactive occurrence can't silence its active twin); real structural diagnostics (stray `#endregion`/`#endif`, unterminated `#if`/`#region`, `#elif` after `#else`, malformed expressions); `#pragma warning disable/restore` honored (CS-code matching, bare form = all warnings); `#error`/`#warning` directives surface; full-line directive coloring. **Editor right-click menu** with **Collapse ▸** submenu — Collapse by Methods / by #Regions / by #if Blocks / XML Doc Comments / Collapse All / Expand All (also in the command palette) — powered by a new precise folding provider (members fold from the SIGNATURE line, regions/#if blocks/doc-comment runs/block comments all fold; always-visible fold gutter). **/// + Enter** above a method/ctor/property/type inserts the XML documentation skeleton with `<summary>`/`<param name="…">`/`<returns>`/`<value>` tab-stops. Latent-bug fix: the completion provider's brain client reference (ReferenceError swallowed into empty suggestions). Verified: 152 engine assertions (23 new Phase 11) + dist markers |
+
 ## Build identity
 
-- Window title: `VelvetSharp — Phase 10`
-- Status bar chip: `Phase 10` (click → Settings)
-- Settings → version: `VelvetSharp Phase 10 · build 10.0.0`
+- Window title: `VelvetSharp — Phase 11`
+- Status bar chip: `Phase 11` (click → Settings)
+- Settings → version: `VelvetSharp Phase 11 · build 11.0.0`
 - Source of truth: `app/src/version.ts` (`APP_PHASE`, `APP_BUILD`)
 - Mirror locations: root `package.json`, `app/package.json`,
-  `desktop/neutralino.config.json` (all `10.0.0`)
+  `desktop/neutralino.config.json` (all `11.0.0`)
 
 ## Next delivery checklist (do this every prompt)
 
