@@ -68,8 +68,8 @@ check("config hydration at boot", /hydrateConfigFromDisk/.test(js));
 check("no fragile stock client import", !/@neutralinojs\/lib/.test(js));
 
 // 4c. version system present (bumped every phase — see VERSIONS.md checklist)
-check("version chip (status bar)", /version-chip/.test(js) && js.includes("Phase 9"));
-check("Settings version row (build 9.0.0)", js.includes("9.0.0") && /settings-path/.test(js));
+check("version chip (status bar)", /version-chip/.test(js) && js.includes("Phase 10"));
+check("Settings version row (build 10.0.0)", js.includes("10.0.0") && /settings-path/.test(js));
 check("no stale 0.7.1 branding", !js.includes("v0.7.1 —"));
 
 // 4d. Phase 8 features present
@@ -86,7 +86,21 @@ check("external terminal shape + legend", js.includes("outside the script — br
 check("problems right-click copy menu", js.includes("Copy this problem") && js.includes("Copy all problems"));
 check("singleton self-loop legend (graph)", js.includes("static singleton"));
 check("no ambiguous-reference warnings (suppressed)", !/Ambiguous reference:/.test(js));
-check("Phase 9 version chip", js.includes("Phase 9") && js.includes("9.0.0"));
+check("phase history retained (VERSIONS.md lists every phase)", (() => {
+  try { const v = read(path.join(ROOT, "VERSIONS.md")); return v.includes("9.0.0") && v.includes("8.0.0"); } catch { return false; }
+})());
+
+// 4f. Phase 10 features present
+check("vertical tidy-tree layout (types mode button)", js.includes("Vertical") && js.includes("flowchart-style tidy tree"));
+check("flow mode forces vertical flowchart", js.includes("vertical"));
+check("instant bare completions (local fast path)", js.includes("· this file"));
+check("suggest fast path + brain RPC wired", /completions\(/.test(js));
+check("navigation history (Go Back / Go Forward)", js.includes("Navigate: Go Back") && js.includes("no earlier position"));
+check("Alt+Left/Right keybinding registered", /ArrowLeft/.test(js) && /ArrowRight/.test(js));
+check("Ctrl+Wheel editor zoom", js.includes("mouseWheelZoom"));
+check("graph load-error state (no silent blank)", js.includes("graph failed to load"));
+check("non-passive graph wheel listener", js.includes("wheel") && !js.includes("onWheel"));
+check("Phase 10 version chip", js.includes("Phase 10") && js.includes("10.0.0"));
 
 // 5. no stale references to removed APIs
 check("no defineVelvetTheme remnant (theme system replaced it)", !js.includes("defineVelvetTheme"));

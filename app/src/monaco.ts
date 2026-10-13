@@ -48,45 +48,148 @@ function getKindMap(): Record<string, monaco.languages.CompletionItemKind> {
   return KIND_MAP;
 }
 
+/* ---------------- Phase 10 — instant bare completions (fast path) ----------------
+ *  The brain is the source of truth, but it lives in a worker that is often
+ *  busy the moment you need suggestions (every keystroke queues a parse, plus
+ *  project sweeps and auto-save IO). Under load the suggest widget popped
+ *  late, flickered or not at all — "completion does not pop, not solid, not
+ *  consistent". The fast path computes same-file methods / fields /
+ *  properties synchronously from the model text, so the widget ALWAYS pops
+ *  immediately; the brain's richer answer (docs, parameter placeholders,
+ *  inherited family members) is raced against a 40 ms budget and cached
+ *  stale-while-revalidate for the next keystroke. */
+interface BareCacheEntry { prefix: string; items: RawItem[] }
+const bareCache = new Map<string, BareCacheEntry>();
+const C_KEYWORDS = new Set([
+  "if", "else", "for", "foreach", "while", "do", "switch", "case", "catch", "using",
+  "return", "throw", "new", "await", "lock", "fixed", "unsafe", "checked", "unchecked",
+  "yield", "when", "typeof", "nameof", "sizeof", "get", "set", "add", "remove", "value",
+]);
+
+/** the bare identifier being typed, or null when the caret is NOT in a bare
+ *  context (member access `x.` and using-directives go straight to the brain) */
+function barePrefixAt(model: any, position: any): string | null {
+  try {
+    const lineText = model.getLineContent(position.lineNumber) ?? "";
+    const before = lineText.slice(0, position.column - 1);
+    if (/(?:^|\s)using\s+[\w.]*$/.test(before)) return null; // namespace completion
+    const m = before.match(/([A-Za-z_][A-Za-z0-9_]*)?$/);
+    const prefix = m?.[1] ?? "";
+    const rest = before.slice(0, before.length - prefix.length);
+    if (rest.trimEnd().endsWith(".")) return null; // member access — brain path
+    return prefix;
+  } catch { return null; }
+}
+
+/** same-file declarations scanned synchronously from the model text. Line-based
+ *  and deliberately conservative: this is the always-there floor, not the
+ *  brain's replacement — the raced RPC result stays the richer source. */
+function localMemberItems(model: any, prefix: string): RawItem[] {
+  let text = "";
+  try { text = model.getValue() ?? ""; } catch { return []; }
+  if (!text || text.length > 500_000) return []; // huge files → brain only
+  const p = prefix.toLowerCase();
+  const out: RawItem[] = [];
+  const seen = new Set<string>();
+  const push = (name: string, kind: "method" | "property" | "field", detail: string) => {
+    if (!name || C_KEYWORDS.has(name) || seen.has(name)) return;
+    if (p && !name.toLowerCase().startsWith(p)) return;
+    seen.add(name);
+    out.push({
+      label: name,
+      kind: kind === "method" ? "method" : kind === "field" ? "field" : "property",
+      detail: detail + " · this file",
+      insert: kind === "method" ? name + "()" : name,
+      sortText: (kind === "method" ? "03" : "04") + name.toLowerCase(),
+      filterText: name,
+    });
+  };
+  const modRe = /^(?:public|private|protected|internal|static|async|override|virtual|sealed|abstract|extern|unsafe|partial|new|const|readonly|volatile|required)\s+/;
+  for (const raw of text.split("\n")) {
+    const t = raw.trim();
+    if (!t || t.length > 300 || t.startsWith("//") || t.startsWith("*") || t.startsWith("[")) continue;
+    let s = t;
+    let mods = "";
+    for (;;) { // peel modifiers to find the shape underneath
+      const m2 = s.match(modRe);
+      if (!m2) break;
+      mods += m2[0];
+      s = s.slice(m2[0].length);
+    }
+    // method: Type Name( — same line params only (floor quality; the brain
+    // completes multi-line signatures when it answers)
+    let m = s.match(/^([A-Za-z_][\w.<>\[\],?]*?(?:\s*<[^<>]*>)?(?:\s*\[\s*\])?)\s+([A-Za-z_][\w]*)\s*\(/);
+    if (m && !C_KEYWORDS.has(m[2])) { push(m[2], "method", `${m[1].trim()} ${m[2]}(…)`); continue; }
+    // field / property: needs modifiers so locals never leak in
+    if (mods) {
+      m = s.match(/^([A-Za-z_][\w.<>\[\],?]*?(?:<[^<>]*>)?(?:\[\s*\])?)\s+([A-Za-z_][\w]*)\s*(?=[;={])/);
+      if (m && !C_KEYWORDS.has(m[2])) {
+        const isProp = s[m[0].length] === "{";
+        push(m[2], isProp ? "property" : "field", `${m[1].trim()} ${m[2]}`);
+      }
+    }
+  }
+  return out;
+}
+
+function dedupeItems(primary: RawItem[], fallback: RawItem[]): RawItem[] {
+  const seen = new Set(primary.map((c) => c.label));
+  const out = [...primary];
+  for (const c of fallback) if (!seen.has(c.label)) { seen.add(c.label); out.push(c); }
+  return out;
+}
+
+async function provideCompletionImpl(model: any, position: any): Promise<{ suggestions: monaco.languages.CompletionItem[] }> {
+  const line = position.lineNumber - 1;
+  const col = position.column - 1;
+  const path = pathOf(model);
+  const prefix = barePrefixAt(model, position);
+  const req = client.completions(path, line, col);
+
+  if (prefix === null) {
+    // member access / using — the brain's specialised paths, no fast floor
+    let items: any[] = [];
+    try { items = await req; } catch { return { suggestions: [] }; }
+    return { suggestions: toSuggestions(items, model, position) };
+  }
+
+  // ---- bare context: instant local floor + raced brain answer ----
+  const locals = localMemberItems(model, prefix);
+  const cached = bareCache.get(path);
+  const cachedItems = cached && cached.prefix === prefix ? cached.items : [];
+  let brain: RawItem[] | null = null;
+  try {
+    brain = await Promise.race([
+      req,
+      new Promise((r) => setTimeout(() => r(null), 40)),
+    ]);
+  } catch { brain = []; }
+  const floor = dedupeItems(cachedItems, locals);
+  const merged = brain ? dedupeItems(brain, floor) : floor;
+  const keep = brain ? dedupeItems(brain, locals) : floor;
+  bareCache.set(path, { prefix, items: keep });
+  if (!brain) {
+    // worker busy — revalidate in the background so the NEXT keystroke
+    // (a longer prefix, usually) already merges the fresh, richer answer
+    req.then((v: RawItem[]) => { try { bareCache.set(path, { prefix, items: dedupeItems(v, locals) }); } catch { /* model gone */ } }).catch(() => {});
+  }
+  return { suggestions: toSuggestions(merged, model, position) };
+}
+
 export function registerProviders(client: BrainClient) {
   monaco.languages.registerCompletionItemProvider(CSHARP_LANG, {
-    triggerCharacters: [".", " ", "[", "@", "("],
+    // Phase 10: plain space removed — it fired a request after EVERY finished
+    // word and popped the widget with the whole universe (a "not consistent"
+    // complaint); quickSuggestions handles typing naturally.
+    triggerCharacters: [".", "[", "@", "("],
     async provideCompletionItems(model, position) {
-      const line = position.lineNumber - 1;
-      const col = position.column - 1;
-      let items: any[];
       try {
-        items = await client.completions(pathOf(model), line, col);
+        return await provideCompletionImpl(model, position);
       } catch {
+        // a completion bug must NEVER surface as an unhandled rejection (which
+        // opens the global error popup mid-typing) — degrade to no suggestions
         return { suggestions: [] };
       }
-      const word = model.getWordUntilPosition(position);
-      const range = {
-        startLineNumber: position.lineNumber,
-        endLineNumber: position.lineNumber,
-        startColumn: word.startColumn,
-        endColumn: word.endColumn,
-      };
-      const eol = eolOfMonaco(model); // snippets authored with \n must match the document
-      const seen = new Set<string>();
-      const suggestions: monaco.languages.CompletionItem[] = [];
-      for (const c of items) {
-        if (seen.has(c.label)) continue;
-        seen.add(c.label);
-        const rawInsert = c.insert ?? c.label;
-        suggestions.push({
-          label: c.label,
-          kind: getKindMap()[c.kind] ?? monaco.languages.CompletionItemKind.Text,
-          detail: c.detail,
-          documentation: c.doc ? { value: mdDoc(c.detail ?? "", c.doc) } : undefined,
-          insertText: convertEol(rawInsert, eol),
-          insertTextRules: rawInsert.includes("$") ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet : undefined,
-          range,
-          sortText: c.sortText ?? c.label,
-          filterText: c.filterText ?? c.label,
-        });
-      }
-      return { suggestions };
     },
   });
 
@@ -215,6 +318,49 @@ export function registerQuickFixes(getDiags: (path: string) => { line: number; c
 
 function pathOf(model: monaco.editor.ITextModel): string {
   return decodeURIComponent(model.uri.path).replace(/^\//, "");
+}
+
+/** a completion item as the brain (and the local fast path) emit it */
+interface RawItem {
+  label: string;
+  kind?: string;
+  detail?: string;
+  doc?: string;
+  insert?: string;
+  sortText?: string;
+  filterText?: string;
+}
+
+/** brain items (or fast-path locals) → Monaco suggestions (shared shaping).
+ *  `position` is the PROVIDER's caret — ITextModel has no getPosition(). */
+function toSuggestions(items: RawItem[], model: monaco.editor.ITextModel, position: monaco.Position): monaco.languages.CompletionItem[] {
+  const word = model.getWordUntilPosition(position);
+  const range = {
+    startLineNumber: word.startLineNumber,
+    endLineNumber: word.endLineNumber,
+    startColumn: word.startColumn,
+    endColumn: word.endColumn,
+  };
+  const eol = eolOfMonaco(model); // snippets authored with \n must match the document
+  const seen = new Set<string>();
+  const suggestions: monaco.languages.CompletionItem[] = [];
+  for (const c of items) {
+    if (!c || !c.label || seen.has(c.label)) continue;
+    seen.add(c.label);
+    const rawInsert = c.insert ?? c.label;
+    suggestions.push({
+      label: c.label,
+      kind: getKindMap()[c.kind ?? ""] ?? monaco.languages.CompletionItemKind.Text,
+      detail: c.detail,
+      documentation: c.doc ? { value: mdDoc(c.detail ?? "", c.doc) } : undefined,
+      insertText: convertEol(rawInsert, eol),
+      insertTextRules: rawInsert.includes("$") ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet : undefined,
+      range,
+      sortText: c.sortText ?? c.label,
+      filterText: c.filterText ?? c.label,
+    });
+  }
+  return suggestions;
 }
 
 function mdDoc(detail: string, doc: string): string {

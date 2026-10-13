@@ -43,6 +43,12 @@ export interface CallFlowResult {
 
 const MAX_NODES = 160;
 const MAX_EDGES = 400;
+/** Phase 10 — walk-time safety valve: the collector may gather up to this many
+ *  raw edges BEFORE selection; the final result is still capped to MAX_EDGES
+ *  after the connectivity ranking. A fixed low cap here used to truncate the
+ *  walk itself, so big scripts lost their helper nodes but kept their callers
+ *  — the rendered graph was a wall of isolated methods. */
+const MAX_RAW_EDGES = 4000;
 const MAX_EXT_LABEL = 44;
 
 interface MDecl {
@@ -159,7 +165,7 @@ export function buildCallFlow(engine: any, path: string): CallFlowResult {
     const key = `${from}|${to}`;
     const e = edgeMap.get(key);
     if (e) { e.count = Math.min(99, e.count + 1); return; }
-    if (edgeMap.size >= MAX_EDGES) { truncated = true; return; }
+    if (edgeMap.size >= MAX_RAW_EDGES) { truncated = true; return; } // ranking happens later — collect generously
     edgeMap.set(key, { from, to, count: 1, external });
   };
 
@@ -188,28 +194,62 @@ export function buildCallFlow(engine: any, path: string): CallFlowResult {
     }
   }
 
-  /* ---------- assemble nodes ---------- */
-  const calledInternally = new Set<string>();
-  for (const e of edgeMap.values()) if (!e.external) calledInternally.add(e.to);
+  /* ---------- assemble: rank by connectivity, THEN cap (Phase 10) ----------
+   *  The old assembly sliced nodes in declaration order, so a script with more
+   *  methods than the cap kept its 150 callers and silently DROPPED the 40
+   *  helpers they call — the graph rendered as isolated nodes with most edges
+   *  gone. Rank every node by total edge weight (its call traffic) and keep
+   *  the most connected subgraph; the toolbar's "top N of M most connected"
+   *  chip finally tells the truth. */
+  const deg = new Map<string, number>();
+  for (const e of edgeMap.values()) {
+    const w = Math.max(1, Math.min(9, e.count));
+    deg.set(e.from, (deg.get(e.from) ?? 0) + w);
+    deg.set(e.to, (deg.get(e.to) ?? 0) + w);
+  }
 
-  const methodNodes: FlowNode[] = methods.map((m) => ({
+  const extNodes = [...extById.values()];
+  const rawTotal = methods.length + extNodes.length;
+  let selMethods = methods;
+  let selExt = extNodes;
+  if (rawTotal > MAX_NODES) {
+    truncated = true;
+    // proportional budget: both populations survive (a flow graph with only
+    // externals — or only methods — is unreadable); degree breaks ties
+    const rankedM = [...methods].sort((a, b) =>
+      (deg.get(nodeIdOf(b)) ?? 0) - (deg.get(nodeIdOf(a)) ?? 0) || a.line - b.line);
+    const rankedE = [...extNodes].sort((a, b) =>
+      (deg.get(a.id) ?? 0) - (deg.get(b.id) ?? 0) || a.line - b.line);
+    const keepM = Math.max(8, Math.min(rankedM.length, Math.round(MAX_NODES * (rankedM.length / rawTotal))));
+    const keepE = Math.max(0, MAX_NODES - keepM);
+    selMethods = rankedM.slice(0, keepM);
+    selExt = rankedE.slice(0, Math.min(rankedE.length, keepE));
+  }
+
+  const methodNodes: FlowNode[] = selMethods.map((m) => ({
     id: nodeIdOf(m),
     label: m.name,
     kind: "method",
     container: m.container,
     line: m.line,
     ret: m.ret,
-    entry: !calledInternally.has(nodeIdOf(m)),
+    entry: false, // filled in after edge filtering, below
     unityMsg: UNITY_MESSAGE_NAMES.has(m.name),
   }));
 
-  let nodes: FlowNode[] = [...methodNodes, ...extById.values()];
-  if (nodes.length > MAX_NODES) {
-    truncated = true;
-    nodes = nodes.slice(0, MAX_NODES);
-  }
+  const nodes: FlowNode[] = [...methodNodes, ...selExt];
   const ids = new Set(nodes.map((n) => n.id));
-  const edges = [...edgeMap.values()].filter((e) => ids.has(e.from) && ids.has(e.to));
+  let edges = [...edgeMap.values()].filter((e) => ids.has(e.from) && ids.has(e.to));
+  if (edges.length > MAX_EDGES) {
+    truncated = true;
+    edges.sort((a, b) => b.count - a.count);
+    edges = edges.slice(0, MAX_EDGES);
+  }
+  // entry = nothing that SURVIVED selection calls it (a caller outside the cap
+  // must not make a node look non-entry while its caller is invisible)
+  const calledInternally = new Set<string>();
+  for (const e of edges) if (!e.external) calledInternally.add(e.to);
+  for (const n of methodNodes) n.entry = !calledInternally.has(n.id);
 
   return {
     ok: true,

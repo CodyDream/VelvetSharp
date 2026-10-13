@@ -1079,6 +1079,64 @@ async function main() {
       nodeOf("Awake")?.entry === true && nodeOf("Start")?.entry === true && nodeOf("BuildPayload")?.entry === false);
   }
 
+  // ---- TEST55: Phase 10 — connectivity-ranked flow selection + hardening ----
+  // A blind declaration-order slice used to keep a big script's callers but
+  // DROP the helpers they call — the graph rendered as isolated nodes with
+  // most edges gone. The ranked selection must keep the connected core.
+  {
+    const results10: [string, boolean][] = [];
+    const check10 = (name: string, ok: boolean) => {
+      results10.push([name, !!ok]);
+      console.log(`  ${ok ? "PASS" : "FAIL"} — ${name}`);
+    };
+    // 150 callers × 3 helper calls + 2 externals, 40 helpers, 30-deep chain
+    let big = "using UnityEngine;\n\npublic class BigScript : MonoBehaviour\n{\n";
+    for (let i = 0; i < 150; i++) {
+      big += `    public void Meth${i}() {\n        Helper${i % 40}();\n        Helper${(i + 7) % 40}();\n        Helper${(i + 13) % 40}();\n        Debug.Log("m${i}");\n        Mathf.Clamp(i, 0, 1);\n    }\n`;
+    }
+    for (let i = 0; i < 40; i++) {
+      big += `    private void Helper${i}() { Debug.Log("h${i}"); transform.position = Vector3.zero; }\n`;
+    }
+    for (let i = 0; i < 30; i++) {
+      big += `    private void Chain${i}() { ${i < 29 ? `Chain${i + 1}(); ` : ""}Debug.Log("c${i}"); }\n`;
+    }
+    big += "}\n";
+    const bigPath = "__test55__/BigScript.cs";
+    engine.updateFile(bigPath, big, true);
+    const t0 = Date.now();
+    const bf = engine.callFlow(bigPath);
+    const dt = Date.now() - t0;
+    const bfn = (label: string) => bf.nodes.find((n: any) => n.label === label);
+    check10("TEST55a big script flow completes fast", bf.ok === true && dt < 300);
+    check10("TEST55b nodes capped at 160", bf.nodes.length <= 160);
+    check10("TEST55c edges survive the cap (ranked, not sliced)", bf.edges.length >= 300);
+    check10("TEST55d helper methods survive selection (connected core kept)",
+      !!bfn("Helper0") && !!bfn("Helper7") && !!bfn("Helper13"));
+    check10("TEST55e both populations present (methods + external terminals)",
+      bf.nodes.some((n: any) => n.kind === "external") && bf.nodes.some((n: any) => n.kind === "method"));
+    check10("TEST55f entry flags computed from SURVIVING edges only",
+      bf.nodes.filter((n: any) => n.kind === "method").every((n: any) =>
+        n.entry === !bf.edges.some((e: any) => !e.external && e.to === n.id)));
+
+    // mutual recursion + self recursion must terminate and keep the self edge
+    engine.updateFile("__test55__/Mad.cs",
+      "using UnityEngine;\npublic class Mad : MonoBehaviour {\n  public void A() { B(); A(); Debug.Log(\"a\"); }\n  public void B() { A(); C(); }\n  public void C() { B(); }\n}\n", true);
+    const mad = engine.callFlow("__test55__/Mad.cs");
+    const selfEdge = mad.edges.find((e: any) => e.from === "m::Mad::A" && e.to === "m::Mad::A");
+    check10("TEST55g mutual recursion terminates, A→A self edge kept",
+      mad.ok === true && mad.nodes.length >= 3 && !!selfEdge);
+
+    // every flow node id/shape sanity — renderer depends on these invariants
+    check10("TEST55h flow invariants: unique ids, methods have container+line",
+      new Set(bf.nodes.map((n: any) => n.id)).size === bf.nodes.length &&
+      bf.nodes.filter((n: any) => n.kind === "method").every((n: any) => n.line >= 0 && typeof n.container === "string"));
+
+    const failed10 = results10.filter(([, ok]) => !ok);
+    console.log(`\n=========== Phase 10 RESULT: ${results10.length - failed10.length}/${results10.length} PASS ===========`);
+    for (const [name] of failed10) console.log("  FAILED:", name);
+    if (failed10.length) process.exitCode = 2;
+  }
+
   // ---- Phase 9 summary ----
   const failed8 = results8.filter(([, ok]) => !ok);
   console.log(`\n=========== Phase 8 RESULT: ${results8.length - failed8.length}/${results8.length} PASS ===========`);

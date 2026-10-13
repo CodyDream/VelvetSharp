@@ -542,6 +542,27 @@ function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // Phase 10 — capture-phase keys that must run BEFORE the editor sees them
+  useEffect(() => {
+    const onCapKey = (e: KeyboardEvent) => {
+      // plain F12 — snapshot the pre-jump position for Go Back, then let
+      // Monaco reveal the definition (do NOT preventDefault here)
+      if (e.key === "F12" && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        navPush(currentMark());
+        return;
+      }
+      // Alt+Left / Alt+Right — navigation history (Go Back / Go Forward)
+      if (e.altKey && e.key === "ArrowLeft" && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault(); navGo(-1); return;
+      }
+      if (e.altKey && e.key === "ArrowRight" && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault(); navGo(1); return;
+      }
+    };
+    window.addEventListener("keydown", onCapKey, true);
+    return () => window.removeEventListener("keydown", onCapKey, true);
+  }, []);
+
   return (
     <div className="app">
       <div className="titlebar">
@@ -1393,6 +1414,7 @@ function OutlinePanel() {
 }
 
 function jumpToLine(line: number, col: number) {
+  navPush(currentMark()); // Phase 10 — every jump is a Go Back waypoint
   const ed = (window as any).__editor;
   if (!ed) return;
   ed.revealLineInCenter(line + 1);
@@ -1698,6 +1720,7 @@ function EditorArea() {
         fontFamily: "'Cascadia Code', 'JetBrains Mono', Consolas, monospace",
         fontLigatures: true,
         smoothScrolling: true,
+        mouseWheelZoom: true, // Phase 10 — Ctrl+Wheel zooms the editor like Rider/VS Code
         cursorBlinking: "phase",
         cursorSmoothCaretAnimation: "on",
         bracketPairColorization: { enabled: true },
@@ -1823,7 +1846,7 @@ function EditorArea() {
           )}
           <ul>
             <li><b>Ctrl+P</b> quick open · <b>Ctrl+Shift+P</b> commands · <b>Ctrl+T</b> symbols</li>
-            <li><b>Ctrl+Shift+F</b> search · <b>F12</b> go to definition · <b>F2</b> rename symbol project-wide</li>
+            <li><b>Ctrl+Shift+F</b> search · <b>F12</b> go to definition · <b>F2</b> rename symbol project-wide · <b>Alt+Left/Right</b> navigate back/forward · <b>Ctrl+Wheel</b> zoom</li>
             <li>Select any method/variable → the <b>uses panel</b> shows every place it is used and where it comes from</li>
             <li><b>⚡ Call Flow</b> (graph view, or Ctrl+Shift+P → "Call Flow") — how one script's methods call each other; outside calls end as dashed terminals</li>
             <li><b>⬡</b> dependency graph — left-click the ⬡ on a folder or right-click it (4 layouts)</li>
@@ -2049,6 +2072,9 @@ function Palette() {
     } },
     { label: "Refactor: Rename Symbol (F2)", run: () => void startRename() },
     { label: "References: Find All Uses of Symbol (Shift+F12)", run: () => (window as any).__requestUses?.() },
+    // Phase 10 — navigation history
+    { label: "Navigate: Go Back (Alt+Left)", run: () => navGo(-1) },
+    { label: "Navigate: Go Forward (Alt+Right)", run: () => navGo(1) },
     { label: "View: Toggle Explorer", run: () => useStore.getState().setSidebarView("explorer") },
     { label: "View: Toggle Search Panel", run: () => useStore.getState().setSidebarView("search") },
     { label: "View: Toggle Outline", run: () => useStore.getState().setSidebarView("outline") },
@@ -2154,6 +2180,7 @@ function consumePendingJump(path: string): void {
 }
 
 async function openAt(path: string, line: number, col = 0) {
+  navPush(currentMark()); // Phase 10 — every jump is a Go Back waypoint
   pendingJump = { path, line, col };
   await openFileByPath(path);
   // poll briefly — the model-switch effect usually consumes the jump first
@@ -2167,6 +2194,54 @@ async function openAt(path: string, line: number, col = 0) {
     }
   }
   if (pendingJump?.path === path) pendingJump = null;
+}
+
+/* ------------------ Phase 10 — navigation history (Go Back / Go Forward) ------------------
+ *  Rider/VS Code users hit "navigate back" constantly after F12, search hits,
+ *  problems and outline jumps — without it deep dives are one-way. openAt /
+ *  jumpToLine record the pre-jump caret position; Alt+Left walks the stack
+ *  back, Alt+Right forward. F12 snapshots via a capture-phase key listener. */
+type NavMark = { path: string; line: number; col: number };
+const navBack: NavMark[] = [];
+const navFwd: NavMark[] = [];
+let navRestoring = false;
+
+function currentMark(): NavMark | null {
+  const st = useStore.getState();
+  const ed = (window as any).__editor;
+  const pos = ed?.getPosition?.();
+  if (!st.active || st.active === "__graph__" || !pos) return null;
+  return { path: st.active, line: pos.lineNumber - 1, col: pos.column - 1 };
+}
+
+function navPush(mark: NavMark | null): void {
+  if (navRestoring || !mark) return;
+  const last = navBack[navBack.length - 1];
+  if (last && last.path === mark.path && last.line === mark.line && last.col === mark.col) return;
+  navBack.push(mark);
+  if (navBack.length > 100) navBack.shift();
+  navFwd.length = 0;
+}
+
+function navGo(dir: -1 | 1): void {
+  const hist = dir === -1 ? navBack : navFwd;
+  const other = dir === -1 ? navFwd : navBack;
+  const cur = currentMark();
+  let m = hist.pop();
+  if (!m) { useStore.getState().setStatus(dir === -1 ? "navigation history: no earlier position" : "navigation history: no forward position"); return; }
+  // skip a mark that is exactly where we already are (jump then jump back)
+  if (cur && m.path === cur.path && m.line === cur.line && m.col === cur.col) {
+    const next = hist.pop();
+    if (next) m = next;
+  }
+  navRestoring = true;
+  try {
+    if (cur) other.push(cur);
+    useStore.getState().setStatus(`${dir === -1 ? "back to" : "forward to"} ${m.path.split("/").pop()}:${m.line + 1}`);
+    void openAt(m.path, m.line, m.col);
+  } finally {
+    window.setTimeout(() => { navRestoring = false; }, 400);
+  }
 }
 
 /* ------------------------------ search ------------------------------ */

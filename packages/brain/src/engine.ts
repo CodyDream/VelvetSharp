@@ -1362,9 +1362,24 @@ export class VelvetSharpEngine {
 
   /** Phase 9 — per-script call-flow graph: in-file method nodes + in-file call
    *  edges; anything unresolved becomes an external TERMINAL node (different
-   *  shape in the UI, branch ends there). */
+   *  shape in the UI, branch ends there). Phase 10: an internal error lands as
+   *  a readable empty result, never as a dead RPC that leaves the graph view
+   *  spinning (one of the reported "sometimes crashes"). */
   callFlow(path: string): CallFlowResult {
-    return buildCallFlow(this, path);
+    try {
+      return buildCallFlow(this, path);
+    } catch (e: any) {
+      return {
+        ok: false,
+        reason: `internal error: ${String(e?.message ?? e)}`,
+        file: path,
+        nodes: [],
+        edges: [],
+        truncated: false,
+        methodCount: 0,
+        extCount: 0,
+      };
+    }
   }
 
   /** files indexed from the startup cache that have no parse tree yet —

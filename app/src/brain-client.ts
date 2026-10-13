@@ -124,7 +124,7 @@ export interface DepNodeResult {
   ns: string; asm: string | null; isMono: boolean; external: boolean;
   outOfScope?: boolean; singleton?: boolean; refCount: number; outDeg: number; inDeg: number;
 }
-export interface DepEdgeResult { from: string; to: string; kind: "extends" | "implements" | "uses" | "self"; weight: number }
+export interface DepEdgeResult { from: string; to: string; kind: "extends" | "implements" | "uses" | "self" | "call" | "extcall"; weight: number }
 export interface DepGraphResult {
   scope: string;
   nodes: DepNodeResult[];

@@ -17,7 +17,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useStore } from "./store";
 import type { BrainClient, DepGraphResult, DepNodeResult, DepEdgeResult, CallFlowResult } from "./brain-client";
 
-type LayoutName = "hierarchical" | "organic" | "circular" | "business";
+type LayoutName = "hierarchical" | "vertical" | "organic" | "circular" | "business";
 
 interface Pt { x: number; y: number }
 interface LaidNode { node: DepNodeResult; x: number; y: number } // top-left
@@ -64,7 +64,21 @@ function flowToGraph(r: CallFlowResult): DepGraphResult & { flowReason?: string 
     kind: e.from === e.to && !e.external ? "self" : e.external ? "extcall" : "call",
     weight: e.count,
   }));
-  return { scope: r.file, nodes, edges, truncated: r.truncated, totalTypes: r.nodes.length };
+  return { scope: r.file, nodes, edges, truncated: r.truncated, totalTypes: Math.max(r.nodes.length, (r.methodCount ?? 0) + (r.extCount ?? 0)) };
+}
+
+/** Phase 10 — the flow result must survive even a malformed worker payload:
+ *  a throw inside the mapper used to hit the bare .catch and render a silent
+ *  blank canvas that looked like "the graph crashed". */
+function safeFlowToGraph(r: CallFlowResult): DepGraphResult & { flowReason?: string } {
+  try {
+    return flowToGraph(r);
+  } catch (e: any) {
+    return {
+      scope: r?.file ?? "", nodes: [], edges: [], truncated: false, totalTypes: 0,
+      flowReason: `call flow failed to map: ${String(e?.message ?? e)} — press ⟳ to retry`,
+    };
+  }
 }
 
 /* --------------------------------- layouts --------------------------------- */
@@ -84,25 +98,33 @@ function buildAdj(nodes: DepNodeResult[], edges: DepEdgeResult[]) {
 
 function layered(nodes: DepNodeResult[], edges: DepEdgeResult[]) {
   const { deps } = buildAdj(nodes, edges);
-  const byId = new Map(nodes.map((n) => [n.id, n] as const));
   const layer = new Map<string, number>();
-  // longest-path layering with cycle guard (DFS, gray stack)
+  // longest-path layering with cycle guard — Phase 10: iterative (explicit
+  // stack). The recursive DFS could overflow the JS stack on pathological
+  // chains (a 10k-call chain), and a layout crash must never reach the UI.
   const state = new Map<string, 0 | 1 | 2>();
-  const layerOf = (id: string): number => {
-    const memo = layer.get(id);
-    if (memo !== undefined) return memo;
-    if (state.get(id) === 1) { layer.set(id, 0); return 0; } // cycle — pin at 0
-    state.set(id, 1);
-    let l = 0;
-    for (const d of deps.get(id) ?? []) {
-      if (d === id) continue;
-      l = Math.max(l, layerOf(d) + 1);
+  for (const start of nodes) {
+    if (state.get(start.id)) continue;
+    state.set(start.id, 1);
+    const stack: { id: string; i: number }[] = [{ id: start.id, i: 0 }];
+    while (stack.length) {
+      const top = stack[stack.length - 1];
+      const dl = deps.get(top.id) ?? [];
+      if (top.i < dl.length) {
+        const d = dl[top.i++];
+        if (d === top.id) continue; // self edge
+        const s = state.get(d) ?? 0;
+        if (s === 0) { state.set(d, 1); stack.push({ id: d, i: 0 }); }
+        else if (s === 1 && !layer.has(d)) layer.set(d, 0); // cycle — pin at 0
+      } else {
+        let l = 0;
+        for (const d of dl) { if (d !== top.id) l = Math.max(l, (layer.get(d) ?? 0) + 1); }
+        layer.set(top.id, l);
+        state.set(top.id, 2);
+        stack.pop();
+      }
     }
-    state.set(id, 2);
-    layer.set(id, l);
-    return l;
-  };
-  for (const n of nodes) layerOf(n.id);
+  }
   let maxLayer = 0;
   layer.forEach((l) => { if (l > maxLayer) maxLayer = l; });
 
@@ -128,6 +150,148 @@ function layered(nodes: DepNodeResult[], edges: DepEdgeResult[]) {
     }
   }
   return { rows, maxLayer };
+}
+
+/* --------------------- Phase 10 — vertical tidy-tree ---------------------
+ *  A layered layout packs every node of the same depth into ONE row, so a
+ *  call flow renders as a wide thin strip ("too much horizontal, not
+ *  vertical"). This is a flowchart instead: sources on top, calls flow DOWN,
+ *  each branch owns its own column (Reingold–Tilford style subtree packing).
+ *  Shared callees parent to the FIRST visitor that reaches them — later
+ *  callers draw cross edges. Disjoint cycles seed extra roots, so every node
+ *  is always placed. */
+function layoutVertical(nodes: DepNodeResult[], edges: DepEdgeResult[]): { nodes: LaidNode[]; edges: LaidEdge[] } {
+  const byId = new Map(nodes.map((n) => [n.id, n] as const));
+  const children = new Map<string, string[]>();
+  const inbound = new Map<string, number>();
+  for (const n of nodes) { children.set(n.id, []); inbound.set(n.id, 0); }
+  const seenTree = new Set<string>();
+  for (const e of edges) {
+    if (!byId.has(e.from) || !byId.has(e.to)) continue;
+    if (e.from === e.to) continue;               // self loops render separately
+    const k = e.from + "→" + e.to;
+    if (seenTree.has(k)) continue;               // second parent → cross edge
+    seenTree.add(k);
+    children.get(e.from)!.push(e.to);
+    inbound.set(e.to, (inbound.get(e.to) ?? 0) + 1);
+  }
+
+  const parent = new Map<string, string>();
+  const pre: string[] = [];                      // DFS pre-order (parents before children)
+  const placed = new Set<string>();
+
+  // one pass: seed → claim unclaimed children depth-first (explicit stack)
+  const passFrom = (seed: string) => {
+    const stack: string[] = [seed];
+    while (stack.length) {
+      const id = stack.pop()!;
+      if (placed.has(id)) continue;
+      placed.add(id);
+      pre.push(id);
+      const kids = children.get(id) ?? [];
+      for (let i = kids.length - 1; i >= 0; i--) {
+        const c = kids[i];
+        if (placed.has(c) || parent.has(c)) continue;
+        parent.set(c, id);
+        stack.push(c);
+      }
+    }
+  };
+
+  for (const n of nodes) if ((inbound.get(n.id) ?? 0) === 0 && !placed.has(n.id)) passFrom(n.id);
+  for (const n of nodes) if (!placed.has(n.id)) passFrom(n.id); // disjoint cycles / orphans
+
+  const LEAF_W = NODE_W + GAP_X;
+  const width = new Map<string, number>();
+  const kidsOf = (id: string) => (children.get(id) ?? []).filter((c) => parent.get(c) === id);
+
+  const laid: LaidNode[] = [];
+  const center = new Map<string, Pt>();
+  let rx = 0;                                    // running x for successive root subtrees
+  let maxDepth = 0;
+
+  const placeTree = (seedId: string, depth0: number) => {
+    // collect this pass's subtree in pre-order, then width it bottom-up
+    const local: string[] = [];
+    const inLocal = new Set<string>();
+    const stack: string[] = [seedId];
+    while (stack.length) {
+      const id = stack.pop()!;
+      if (inLocal.has(id)) continue;
+      inLocal.add(id);
+      local.push(id);
+      const kids = kidsOf(id).filter((c) => placed.has(c));
+      for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
+    }
+    for (let i = local.length - 1; i >= 0; i--) {
+      const id = local[i];
+      let w = 0;
+      for (const c of kidsOf(id)) w += width.get(c) ?? LEAF_W;
+      width.set(id, Math.max(LEAF_W, w));
+    }
+    // top-down x assignment: parent centered over its children
+    const assign = (id: string, cx: number, dep: number) => {
+      const node = byId.get(id);
+      if (!node) return;
+      maxDepth = Math.max(maxDepth, dep);
+      center.set(id, { x: cx, y: dep * (NODE_H + GAP_Y) });
+      laid.push({ node, x: cx - NODE_W / 2, y: dep * (NODE_H + GAP_Y) });
+      const kids = kidsOf(id);
+      let w = 0;
+      for (const c of kids) w += width.get(c) ?? LEAF_W;
+      let x = cx - w / 2;
+      for (const c of kids) {
+        const cw = width.get(c) ?? LEAF_W;
+        assign(c, x + cw / 2, dep + 1);
+        x += cw;
+      }
+    };
+    assign(seedId, rx + (width.get(seedId) ?? LEAF_W) / 2, depth0);
+    rx += (width.get(seedId) ?? LEAF_W) + GAP_X;
+  };
+
+  // place every pass tree left-to-right; `placed` order == discovery order
+  const rooted = pre.filter((id) => !parent.has(id));
+  for (const r of rooted) if (byId.has(r)) placeTree(r, 0);
+  // anything still unplaced (cycle member whose seed was itself claimed as a
+  // child) is tiled onto one extra row — a layout must never drop a node
+  const laidIds = new Set(laid.map((l) => l.node.id));
+  for (const n of nodes) {
+    if (laidIds.has(n.id)) continue;
+    const cx = rx + LEAF_W / 2;
+    center.set(n.id, { x: cx, y: (maxDepth + 1) * (NODE_H + GAP_Y) });
+    laid.push({ node: n, x: cx - NODE_W / 2, y: (maxDepth + 1) * (NODE_H + GAP_Y) });
+    rx += LEAF_W;
+  }
+
+  const outEdges: LaidEdge[] = [];
+  for (const e of edges) {
+    const s = center.get(e.from), t = center.get(e.to);
+    if (!s || !t) continue;
+    if (e.from === e.to) { outEdges.push({ edge: e, points: selfLoopPts(s) }); continue; }
+    if (t.y >= s.y) outEdges.push({ edge: e, points: bezierDown(s, t) });   // down / sideways
+    else outEdges.push({ edge: e, points: elbow(s, t) });                   // back edge — around the side
+  }
+  return { nodes: laid, edges: outEdges };
+}
+
+/** last-resort grid — cannot throw, cannot loop; used only if every real
+ *  layout engine somehow fails, so the graph view never blanks the app */
+function layoutGrid(nodes: DepNodeResult[], edges: DepEdgeResult[]): { nodes: LaidNode[]; edges: LaidEdge[] } {
+  const cols = Math.max(1, Math.ceil(Math.sqrt(nodes.length)));
+  const centers = new Map<string, Pt>();
+  const laid: LaidNode[] = nodes.map((n, i) => {
+    const p = { x: (i % cols) * (NODE_W + GAP_X), y: Math.floor(i / cols) * (NODE_H + GAP_Y) };
+    centers.set(n.id, { x: p.x + NODE_W / 2, y: p.y + NODE_H / 2 });
+    return { node: n, ...p };
+  });
+  const outEdges: LaidEdge[] = [];
+  for (const e of edges) {
+    const s = centers.get(e.from), t = centers.get(e.to);
+    if (!s || !t) continue;
+    outEdges.push({ edge: e, points: e.from === e.to ? selfLoopPts(s) : [s, t] });
+  }
+  return { nodes: laid, edges: outEdges };
 }
 
 function layoutHierarchical(nodes: DepNodeResult[], edges: DepEdgeResult[], business: boolean): { nodes: LaidNode[]; edges: LaidEdge[] } {
@@ -326,7 +490,8 @@ function computeLayout(name: LayoutName, nodes: DepNodeResult[], edges: DepEdgeR
   // v0.7.1 crash hardening (user report: graph still crashes, especially circular):
   // a layout bug must NEVER take the app down. Every layout runs inside a guard;
   // on any throw (or a degenerate result) we fall back to the plain hierarchical
-  // layout, which is pure longest-path layering and cannot loop.
+  // layout, which is pure longest-path layering and cannot loop. Phase 10: the
+  // caller wraps even this in a try/catch with a grid backstop.
   const safe = (fn: () => { nodes: LaidNode[]; edges: LaidEdge[] }) => {
     try {
       const r = fn();
@@ -340,9 +505,11 @@ function computeLayout(name: LayoutName, nodes: DepNodeResult[], edges: DepEdgeR
           String(e?.stack ?? ""),
         ), 0);
       } catch { /* store not ready — the fallback still renders */ }
-      return layoutHierarchical(nodes, edges, false);
+      try { return layoutHierarchical(nodes, edges, false); }
+      catch { return layoutGrid(nodes, edges); }
     }
   };
+  if (name === "vertical") return safe(() => layoutVertical(nodes, edges));
   if (name === "organic") return safe(() => layoutOrganic(nodes, edges));
   if (name === "circular") {
     // the ring geometry grows linearly with node count; beyond ~260 nodes the
@@ -365,6 +532,7 @@ const KIND_GLYPH: Record<string, string> = {
 };
 const LAYOUTS: { id: LayoutName; label: string; hint: string }[] = [
   { id: "hierarchical", label: "Hierarchical", hint: "layered top-down — dependencies flow down (Sugiyama)" },
+  { id: "vertical", label: "Vertical", hint: "flowchart-style tidy tree — every branch gets its own column (great for call flow)" },
   { id: "organic", label: "Organic", hint: "force-directed clusters (spring simulation)" },
   { id: "circular", label: "Circular", hint: "dependency ring with center arcs" },
   { id: "business", label: "Business", hint: "layered card nodes with orthogonal elbows" },
@@ -378,6 +546,7 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
   const flowFile = useStore((s) => s.graphFlowFile);
   const [graph, setGraph] = useState<(DepGraphResult & { flowReason?: string }) | null>(null);
   const [busy, setBusy] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null); // Phase 10 — failed requests show WHY, not a silent blank
   const [layout, setLayout] = useState<LayoutName>("hierarchical");
   const [includeExternal, setIncludeExternal] = useState(false);
   const [filter, setFilter] = useState("");
@@ -387,6 +556,10 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
   const hostRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
 
+  // Phase 10 — flow mode ALWAYS renders as a vertical flowchart (that is what
+  // a call flow is); the layout picker stays a types-mode tool
+  const effLayout: LayoutName = mode === "flow" ? "vertical" : layout;
+
   // (re)request the graph — Phase 9: "types" mode asks for the project type
   // graph, "flow" mode asks for the ACTIVE SCRIPT's method call graph
   useEffect(() => {
@@ -395,23 +568,30 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
     setBusy(true);
     const req = mode === "flow"
       ? (flowFile
-          ? client.callFlow(flowFile).then(flowToGraph)
+          ? client.callFlow(flowFile).then(safeFlowToGraph)
           : Promise.resolve({ scope: "", nodes: [], edges: [], truncated: false, totalTypes: 0, flowReason: "open a script first, then switch to Call Flow" }))
       : client.depGraph(scope, includeExternal);
     req
-      .then((g) => { if (!cancel) { setGraph(g); setBusy(false); setSelected(null); } })
-      .catch(() => { if (!cancel) { setGraph(null); setBusy(false); } });
+      .then((g) => { if (!cancel) { setGraph(g); setLoadError(null); setBusy(false); setSelected(null); } })
+      .catch((e: any) => { if (!cancel) { setGraph(null); setLoadError(String(e?.message ?? e)); setBusy(false); } });
     return () => { cancel = true; };
   }, [client, scope, includeExternal, seed, mode, flowFile]);
 
   // auto-refresh when the symbol index changes while the graph is open
-  // (boot finish, renames, reindex) — guards against requesting mid-boot
+  // (boot finish, renames, reindex) — Phase 10: debounced, so a chunked boot
+  // or burst of edits cannot fire a request storm at the brain worker
   const statsFiles = useStore((s) => s.stats.files);
   const graphOpen = useStore((s) => s.graphOpen);
   useEffect(() => {
-    if (graphOpen && statsFiles > 0) useStore.getState().refreshGraph();
+    if (graphOpen && statsFiles > 0) {
+      const t = window.setTimeout(() => useStore.getState().refreshGraph(), 350);
+      return () => window.clearTimeout(t);
+    }
   }, [statsFiles]);
 
+  // Phase 10 — the flow result must survive even a malformed worker payload:
+  // a throw inside the mapper used to hit the bare .catch and render a silent
+  // blank canvas that looked like "the graph crashed"
   const laid = useMemo(() => {
     if (!graph) return null;
     // render-side safety net (defense in depth — brain caps normally win)
@@ -419,8 +599,20 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
     let edges = graph.edges;
     if (nodes.length > MAX_RENDER_NODES) nodes = nodes.slice(0, MAX_RENDER_NODES);
     if (edges.length > MAX_RENDER_EDGES) edges = edges.slice(0, MAX_RENDER_EDGES);
-    return computeLayout(layout, nodes, edges);
-  }, [graph, layout]);
+    const name: LayoutName = effLayout;
+    try {
+      return computeLayout(name, nodes, edges);
+    } catch (e: any) {
+      try {
+        window.setTimeout(() => useStore.getState().showErrorPopup(
+          "Dependency graph layout failed",
+          `Rendering ${nodes.length} nodes with the "${name}" layout failed; a plain grid was drawn instead.\n\n${String(e?.message ?? e)}`,
+          String(e?.stack ?? ""),
+        ), 0);
+      } catch { /* store not ready */ }
+      return layoutGrid(nodes, edges);
+    }
+  }, [graph, effLayout]);
 
   const byId = useMemo(() => new Map((graph?.nodes ?? []).map((n) => [n.id, n] as const)), [graph]);
   const neighbors = useMemo(() => {
@@ -471,18 +663,26 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
 
   useEffect(() => { fit(); }, [fit]);
 
-  const onWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
-    const rect = hostRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-    const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
-    setView((v) => {
-      const scale = Math.max(0.1, Math.min(3.5, v.scale * factor));
-      const k = scale / v.scale;
-      return { scale, x: mx - (mx - v.x) * k, y: my - (my - v.y) * k };
-    });
-  };
+  // Phase 10 — native non-passive wheel listener. React attaches wheel events
+  // passively, so the old synthetic handler's preventDefault() logged console
+  // errors in the webview and occasionally let the page scroll under the graph.
+  useEffect(() => {
+    const el = hostRef.current;
+    if (!el) return;
+    const handler = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+      const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+      setView((v) => {
+        const scale = Math.max(0.1, Math.min(3.5, v.scale * factor));
+        const k = scale / v.scale;
+        return { scale, x: mx - (mx - v.x) * k, y: my - (my - v.y) * k };
+      });
+    };
+    el.addEventListener("wheel", handler, { passive: false });
+    return () => el.removeEventListener("wheel", handler);
+  }, []);
   const onBgMouseDown = (e: React.MouseEvent) => {
     if (e.button !== 0) return;
     dragRef.current = { sx: e.clientX, sy: e.clientY, ox: view.x, oy: view.y };
@@ -590,12 +790,17 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
       <div
         className="dg-canvas"
         ref={hostRef}
-        onWheel={onWheel}
         onMouseDown={onBgMouseDown}
         onDoubleClick={(e) => { if (e.target === e.currentTarget) setSelected(null); }}
       >
         {busy && <div className="dg-empty">building the {mode === "flow" ? "call flow" : "dependency graph"}…</div>}
-        {!busy && !laid?.nodes.length && (
+        {!busy && loadError && (
+          <div className="dg-empty">
+            <div>graph failed to load — {loadError}</div>
+            <div style={{ opacity: 0.7, marginTop: 6 }}>the brain worker may be busy or the file may have changed — press ⟳ to retry</div>
+          </div>
+        )}
+        {!busy && !loadError && !laid?.nodes.length && (
           <div className="dg-empty">
             {mode === "flow"
               ? (graph?.flowReason ?? (flowFile
@@ -635,7 +840,7 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
                   <path
                     key={i}
                     className={cls}
-                    d={pathOfPoints(le.points, layout === "business")}
+                    d={pathOfPoints(le.points, effLayout === "business")}
                     markerEnd={`url(#arr-${kind})`}
                     strokeWidth={kind === "uses" || kind === "call" ? 1 + Math.min(1.6, (le.edge.weight - 1) * 0.25) : undefined}
                   />
@@ -667,7 +872,7 @@ export function DepGraphView({ onOpen }: { onOpen?: (path: string, line: number,
                     <rect
                       className="dg-box"
                       x={0} y={0} width={NODE_W} height={NODE_H}
-                      rx={n.kind === "extcall" ? 21 : layout === "business" ? 3 : 8}
+                      rx={n.kind === "extcall" ? 21 : effLayout === "business" ? 3 : 8}
                     />
                     <text className="dg-glyph" x={12} y={19}>{KIND_GLYPH[n.kind] ?? "▣"}</text>
                     <text className="dg-name" x={30} y={19}>{clip(n.name, 16)}</text>
