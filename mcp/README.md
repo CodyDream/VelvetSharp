@@ -11,11 +11,19 @@ the **running editor** what it sees and then fix things with their own tools:
 | `get_project_structure` | the workspace file tree (optionally scoped to a folder) |
 | `search_code` | the same find-in-files engine as Ctrl+Shift+F — literal / whole-word / regex |
 | `get_file` | file content (or a line range); returns the **live buffer** when the file is open with unsaved changes |
+| `apply_payload` | **write access** — create / modify / delete / move text files in one call (same engine as the Agent Bridge window); returns a per-operation report |
 
-Typical agent loop: *get_workspace_summary → get_problems → fix the errors in
-your own tooling → get_problems again to confirm the list shrank.* Because the
-answers come from the **live editor**, the agent sees the same errors you do —
-no second analyzer, no drift.
+Typical agent loop: *get_workspace_summary → get_problems → fix the errors with
+`apply_payload` (or your own tooling) → get_problems again to confirm the list
+shrank.* Because the answers come from the **live editor**, the agent sees the
+same errors you do — no second analyzer, no drift.
+
+**Web AI agents** (ChatGPT, Claude.ai, Gemini — no MCP access) use the editor's
+**Agent Bridge** instead: `⧉ Structure → AI` copies the project structure
+(you pick the folders; optionally with file contents) plus the JSON contract,
+and `⇩ Apply JSON ← AI` applies the agent's JSON reply with the same
+create/modify/delete/move operations, then hands you a copyable report to paste
+back into the chat.
 
 ## Requirements
 

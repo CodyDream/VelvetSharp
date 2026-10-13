@@ -96,6 +96,11 @@ interface VSState {
   // in-app "type the project path" fallback (native dialog unavailable / canceled)
   pathPrompt: null | { reason?: string };
 
+  // Phase 16 — Agent Bridge: two-window hand-off for web LLMs that cannot
+  // reach the local MCP (copy structure → agent, apply agent JSON → editor)
+  agentBridge: null | { tab: "structure" | "apply" };
+  setAgentBridge: (v: null | { tab: "structure" | "apply" }) => void;
+
   // v0.7.1 — global error popup (message + stack trace, copyable) + bridge chip
   errorPopup: null | { title: string; message: string; stack?: string; at: number };
   bridge: "browser" | "connected" | "connecting" | "offline";
@@ -187,6 +192,8 @@ export const useStore = create<VSState>((set) => ({
   setBridge: (bridge) => set({ bridge }),
   settingsOpen: false,
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+  agentBridge: null,
+  setAgentBridge: (agentBridge) => set({ agentBridge }),
 
   // Phase 8 — usages panel state (reqId guards stale responses)
   uses: null,

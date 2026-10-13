@@ -1802,6 +1802,198 @@ public class Battle13 : MonoBehaviour
     if (failed15.length) process.exitCode = 2;
   }
 
+  // ---- TEST61: Phase 16 — Agent Bridge: web-LLM payload hand-off ----
+  {
+    const results16: [string, boolean][] = [];
+    const check16 = (name: string, ok: boolean) => {
+      results16.push([name, !!ok]);
+      console.log(`  ${ok ? "PASS" : "FAIL"} — ${name}`);
+    };
+    const ab = await import("../app/src/agent-bridge");
+    const os = await import("node:os");
+
+    // -- (a) path guard --
+    check16("TEST61a safeRelPath rejects traversal/drive/absolute/backslash-jumps/empty",
+      ab.safeRelPath("../evil.cs") === null
+      && ab.safeRelPath("Assets/../../evil.cs") === null
+      && ab.safeRelPath("C:\\temp\\x.cs") === null
+      && ab.safeRelPath("/abs/x.cs") === null
+      && ab.safeRelPath("\\\\server\\share\\x.cs") === null
+      && ab.safeRelPath("") === null
+      && ab.safeRelPath("Assets//double//x.cs") === null
+      && ab.safeRelPath("Assets/Scripts/Player.cs") === "Assets/Scripts/Player.cs");
+
+    // -- (b) a well-formed payload normalizes cleanly --
+    const good = ab.normalizePayload({
+      velvetsharp: 1, agent: "GPT", message: "m",
+      operations: [
+        { op: "create", path: "Assets/Scripts/Foo.cs", content: "class Foo {}" },
+        { op: "modify", path: "Assets/Scripts/Foo.cs", find: "class", replace: "CLASS", all: true },
+        { op: "delete", path: "Assets/Scripts/Old.cs" },
+        { op: "move", from: "Assets/A.cs", to: "Assets/B.cs" },
+      ],
+    });
+    check16("TEST61b valid payload normalizes (4 ops, no errors/warnings)",
+      good.payload != null && good.payload.operations.length === 4 && good.errors.length === 0 && good.warnings.length === 0);
+
+    // -- (c) web-LLM tolerances: aliases, missing marker, missing replace, starter content --
+    const aliased = ab.normalizePayload({
+      ops: [
+        { op: "new", path: "Assets/A.cs" },
+        { op: "edit", path: "Assets/A.cs", find: "x" },
+        { op: "remove", path: "Assets/A.cs" },
+        { op: "rename", from: "Assets/A.cs", to: "Assets/B.cs" },
+      ],
+    });
+    check16("TEST61c aliases accepted; missing marker + deleted-find warn; .cs create gets a MonoBehaviour starter",
+      aliased.payload != null
+      && aliased.payload.operations.length === 4
+      && aliased.warnings.length === 3
+      && String((aliased.payload.operations[0] as any).content).includes("MonoBehaviour")
+      && String((aliased.payload.operations[0] as any).content).includes("public class A : MonoBehaviour")
+      && (aliased.payload.operations[1] as any).replace === ""
+      && (aliased.payload.operations[1] as any).all === false
+      && (aliased.payload.operations[3] as any).op === "move");
+
+    // -- (d) hard rejections, one error per bad op --
+    const bad = ab.normalizePayload({
+      velvetsharp: 1,
+      operations: [
+        { op: "create", path: "../evil.cs", content: "x" },
+        { op: "create", path: "C:\\temp\\x.cs", content: "x" },
+        { op: "create", path: "/abs/x.cs", content: "x" },
+        { op: "zork", path: "Assets/x.cs" },
+        { op: "modify", path: "Assets/A.cs" },
+        { op: "create", path: "Assets/x.exe", content: "MZ" },
+        { op: "move", from: "Assets/A.cs", to: "Assets/A.cs" },
+      ],
+    });
+    check16("TEST61d traversal/drive/absolute/unknown-op/contentless-modify/exe/self-move all rejected",
+      bad.payload == null && bad.errors.length === 7
+      && /workspace-relative/.test(bad.errors[0])
+      && /unknown op/.test(bad.errors[3])
+      && /needs either "content"/.test(bad.errors[4])
+      && /only text files/.test(bad.errors[5]));
+
+    // -- (e) probeFind counts occurrences + locates the first --
+    const probe = ab.probeFind("a\nb a\na", "a");
+    check16("TEST61e probeFind counts 3 occurrences, first at line 0",
+      probe.occurrences === 3 && probe.firstLine === 0);
+    const probeNone = ab.probeFind("hello", "zork");
+    check16("TEST61f probeFind reports 0 for a miss", probeNone.occurrences === 0);
+
+    // -- (g) plan + apply over a REAL temp dir --
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "vs-agent16-"));
+    const abs = (p: string) => path.join(tmp, p);
+    fs.mkdirSync(path.dirname(abs("Assets/Scripts/Existing.cs")), { recursive: true });
+    fs.writeFileSync(abs("Assets/Scripts/Existing.cs"), "class Existing {}\n");
+    fs.writeFileSync(abs("Assets/Old.cs"), "class Old {}\n");
+    fs.writeFileSync(abs("Assets/Old.cs.meta"), "guid meta\n");
+    const io = {
+      exists: async (p: string) => fs.existsSync(abs(p)),
+      read: async (p: string) => fs.readFileSync(abs(p), "utf8"),
+      write: async (p: string, c: string) => {
+        fs.mkdirSync(path.dirname(abs(p)), { recursive: true });
+        fs.writeFileSync(abs(p), c);
+      },
+      move: async (from: string, to: string) => {
+        fs.mkdirSync(path.dirname(abs(to)), { recursive: true });
+        fs.renameSync(abs(from), abs(to));
+      },
+      remove: async (p: string) => fs.rmSync(abs(p), { force: true }),
+    };
+    const mixed = ab.normalizePayload({
+      velvetsharp: 1, agent: "Claude", message: "phase16 fixture",
+      operations: [
+        { op: "create", path: "Assets/Scripts/New.cs", content: "class New {}" },
+        { op: "create", path: "Assets/Scripts/Existing.cs", content: "dup" },
+        { op: "modify", path: "Assets/Scripts/Existing.cs", find: "class", replace: "STRUCT", all: true },
+        { op: "modify", path: "Assets/Scripts/Existing.cs", find: "no-such-text", replace: "x" },
+        { op: "delete", path: "Assets/Scripts/Ghost.cs" },
+        { op: "delete", path: "Assets/Old.cs" },
+        { op: "move", from: "Assets/Old.cs.meta", to: "Assets/Moved.meta" },
+      ],
+    }).payload!;
+    const plan = await ab.planPayload(mixed, io);
+    check16("TEST61g planner blocks create-existing / find-miss / delete-missing, allows the rest",
+      plan.length === 7 && plan.filter((r) => r.ok).length === 4
+      && !plan[1].ok && /already exists/.test(plan[1].detail)
+      && !plan[3].ok && /find text not found/.test(plan[3].detail)
+      && !plan[4].ok && /does not exist/.test(plan[4].detail)
+      && plan[2].ok && /1 occurrence/.test(plan[2].detail));
+    // the plan must NOT have touched the disk
+    check16("TEST61h dry-run writes nothing",
+      fs.readFileSync(abs("Assets/Scripts/Existing.cs"), "utf8") === "class Existing {}\n" && fs.existsSync(abs("Assets/Old.cs")));
+    const applied = await ab.applyPayload(mixed, io);
+    check16("TEST61i apply lands create/modify/delete/move; blocked ops never execute",
+      applied.applied === 4 && applied.failed === 3
+      && fs.readFileSync(abs("Assets/Scripts/New.cs"), "utf8") === "class New {}"
+      && fs.readFileSync(abs("Assets/Scripts/Existing.cs"), "utf8") === "STRUCT Existing {}\n"
+      && !fs.existsSync(abs("Assets/Old.cs"))
+      && fs.existsSync(abs("Assets/Moved.meta"))
+      && applied.touched.created.length === 1 && applied.touched.moved.length === 1);
+    check16("TEST61j report carries agent label, per-op rows and the paste-back hint",
+      applied.report.includes("4 applied, 3 failed")
+      && applied.report.includes("agent: Claude")
+      && /FAIL\s+create\s+Assets\/Scripts\/Existing\.cs/.test(applied.report)
+      && /paste this report back/.test(applied.report));
+
+    // -- (k) find/replace first-vs-all semantics --
+    check16("TEST61k applyFindReplace: first-only default, all on demand",
+      ab.applyFindReplace("aXaXa", "a", "b", false) === "bXaXa"
+      && ab.applyFindReplace("aXaXa", "a", "b", true) === "bXbXb");
+
+    // -- (l) structure export: folder selection expands to the subtree --
+    const files16 = [
+      "Assets/Scripts/A.cs", "Assets/Scripts/Sub/B.cs",
+      "Assets/Textures/t.png.meta", "ProjectSettings/ProjectVersion.txt",
+    ];
+    const ex1 = ab.buildStructureExport(files16, new Set(["Assets/Scripts"]), { rootLabel: "Demo" });
+    check16("TEST61l folder selection expands to its subtree only, dirs-first tree",
+      ex1.fileCount === 2 && ex1.text.includes("Demo — selected 2 file(s)")
+      && ex1.text.includes("Assets/Scripts/Sub/") === false // tree renders names, not paths
+      && ex1.text.includes("Scripts/") && ex1.text.includes("A.cs") && ex1.text.includes("B.cs")
+      && !ex1.text.includes("ProjectVersion.txt"));
+    const exFiles = ab.expandSelection(files16, new Set(["Assets/Scripts/Sub", "ProjectSettings/ProjectVersion.txt"]));
+    check16("TEST61m mixed selection: folder prefix + explicit file",
+      exFiles.join(",") === "Assets/Scripts/Sub/B.cs,ProjectSettings/ProjectVersion.txt");
+
+    // -- (n) include-code mode: fenced blocks + maxChars truncation --
+    const ex2 = ab.buildStructureExport(files16, new Set(["Assets/Scripts/A.cs"]), {
+      includeCode: true, read: (p) => "code-of-" + p, maxChars: 10_000,
+    });
+    const ex2b = ab.buildStructureExport(files16, new Set(["Assets/Scripts/A.cs"]), {
+      includeCode: true, read: (p) => "code-of-" + p, maxChars: 40,
+    });
+    check16("TEST61n includeCode emits a csharp fence; a tiny maxChars truncates instead",
+      ex2.text.includes("```csharp") && ex2.text.includes("code-of-Assets/Scripts/A.cs") && !ex2.truncated
+      && ex2b.truncated && !ex2b.text.includes("```csharp"));
+
+    // -- (o) tree + tri-state selection state --
+    const tree16 = ab.buildFileTree(["Assets/B.cs", "Assets/A.cs", "ProjectSettings/P.txt"]);
+    check16("TEST61o buildFileTree sorts dirs-first, files alphabetically",
+      tree16.map((n) => n.name).join(",") === "Assets,ProjectSettings"
+      && tree16[0].children.map((c) => c.name).join(",") === "A.cs,B.cs");
+    const stNode = tree16[0];
+    check16("TEST61p selectionState: folder-entry ON, partial MIXED, empty OFF",
+      ab.selectionState(stNode, new Set(["Assets"])) === "on"
+      && ab.selectionState(stNode, new Set(["Assets/A.cs"])) === "mixed"
+      && ab.selectionState(stNode, new Set()) === "off"
+      && ab.selectionState(tree16[0].children[0], new Set(["Assets/A.cs"])) === "on");
+
+    // -- (q) the agent instructions document the whole contract --
+    check16("TEST61q instructions cover all 4 ops, the velvetsharp marker and the exact-find rule",
+      ["create", "modify", "delete", "move"].every((op) => ab.AGENT_INSTRUCTIONS.includes(`"op": "${op}"`))
+      && ab.AGENT_INSTRUCTIONS.includes('"velvetsharp": 1')
+      && /EXACT/.test(ab.AGENT_INSTRUCTIONS)
+      && ab.AGENT_INSTRUCTIONS.includes("workspace-relative"));
+
+    const failed16 = results16.filter(([, ok]) => !ok);
+    console.log(`\n=========== Phase 16 RESULT: ${results16.length - failed16.length}/${results16.length} PASS ===========`);
+    for (const [name] of failed16) console.log("  FAILED:", name);
+    if (failed16.length) process.exitCode = 2;
+  }
+
   // ---- Phase 9 summary ----
   const failed8 = results8.filter(([, ok]) => !ok);
   console.log(`\n=========== Phase 8 RESULT: ${results8.length - failed8.length}/${results8.length} PASS ===========`);

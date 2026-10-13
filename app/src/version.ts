@@ -27,7 +27,24 @@
  *  Phase 12 = rock-solid desktop connection + never-miss autocomplete ·
  *  Phase 13 = call flow shows only custom methods + order badges + copyable
  *  graph errors · Phase 14 = real find-in-files + MCP for AI agents ·
- *  Phase 15 = this build (FULL C# + Unity preprocessor support: typing `#`
+ *  Phase 15 = full C# + Unity preprocessor support (all 13 directives + the
+ *  whole define world autocompletes with sources) ·
+ *  Phase 16 = this build (AGENT BRIDGE — LLM managing buttons move UP into
+ *  the titlebar: `⧉ Structure → AI` opens the copy window where the user
+ *  picks folders/sub-folders (tri-state checkboxes, presets, path filter,
+ *  optional fenced file contents) and copies a paste-ready structure for
+ *  web AI assistants; `⇩ Apply JSON ← AI` opens the paste window where the
+ *  agent's JSON payload is validated, dry-run planned and applied —
+ *  create / modify (exact find→replace or full content) / delete / move
+ *  with .meta sidecar handling, buffer-first reads, per-file EOL
+ *  preservation, one-undo-step buffer updates and a copyable per-op report
+ *  to paste back into the chat; the same applier powers the new MCP
+ *  `apply_payload` tool, so MCP agents get write access too; payloads are
+ *  guarded (workspace-relative paths only, text-extension allowlist, op
+ *  and size caps) and web-LLM dialects are tolerated (op aliases, missing
+ *  marker, find-without-replace, .cs create without content gets a
+ *  MonoBehaviour starter).
+ *  (Phase 15 was: FULL C# + Unity preprocessor support: typing `#`
  *  completes all 13 real C# directives with docs and self-closing snippets,
  *  `#if `/`#elif `/`#define `/`#undef ` complete the whole symbol world —
  *  Unity built-ins, the UNITY_<maj>_<min>_OR_NEWER chain from
@@ -47,7 +64,7 @@
  *  file contents, discovered via <dataDir>/VelvetSharp/mcp.json).
  *  Every delivery bumps by one.
  */
-export const APP_PHASE = 15;
-export const APP_BUILD = "15.0.0";
+export const APP_PHASE = 16;
+export const APP_BUILD = "16.0.0";
 export const APP_LABEL = `Phase ${APP_PHASE}`;
 export const APP_TITLE = `VelvetSharp — ${APP_LABEL}`;

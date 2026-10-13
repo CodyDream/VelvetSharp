@@ -1,11 +1,11 @@
 ════════════════════════════════════════════════════════════════════
-  VelvetSharp — PHASE 15  ·  portable build (build 15.0.0)
+  VelvetSharp — PHASE 16  ·  portable build (build 16.0.0)
 ════════════════════════════════════════════════════════════════════
 
 VERSION SYSTEM
 ──────────────
 The version is the PHASE number — it bumps by exactly one on every
-delivered update and is never reused. This is Phase 15. The phase is
+delivered update and is never reused. This is Phase 16. The phase is
 always visible in the status bar (bottom right) and in ⚙ Settings.
 
 QUICK START (portable — nothing installs)
@@ -14,6 +14,52 @@ QUICK START (portable — nothing installs)
 2. If the exe is NOT in your Unity project folder: click the folder
    chip in the status bar or the welcome button to pick your project.
 3. First open asks for a COLOR THEME — it is remembered from then on.
+
+WHAT'S NEW IN PHASE 16 — AGENT BRIDGE: WORK HANDS-ON WITH WEB AI
+────────────────────────────────────────────────────────────────
+▲ THE AI BUTTONS LIVE UP TOP NOW (your request)
+  The titlebar carries two new buttons — "⧉ Structure → AI" and
+  "⇩ Apply JSON ← AI" — plus the theme (◐) and settings (⚙) chips.
+  No more digging through the bottom bar.
+
+▲ WINDOW 1: COPY THE PROJECT STRUCTURE TO ANY WEB AI (your request)
+  • A folder tree of your workspace with tri-state checkboxes —
+    check a folder to share it AND everything under it; check or
+    uncheck sub-folders to fine-tune. Presets: all / none /
+    scripts (.cs) only. A filter box narrows big projects.
+  • "include file contents" appends every selected file as a
+    ```csharp fenced block (needed when the agent must edit exact
+    code). Char counter + a truncation warning keep the paste sane.
+  • "Copy to clipboard" (with a 3-step fallback chain) and
+    "Copy agent instructions" — the second one puts a compact JSON
+    contract on your clipboard that teaches ANY web LLM (ChatGPT,
+    Claude, Gemini…) how to answer with an applicable payload.
+
+▲ WINDOW 2: PASTE THE AGENT'S JSON — VELVETSHARP DOES THE WORK
+  • Paste the JSON your AI replied with, hit validate: every op is
+    dry-run against the real workspace and you see a green/red plan
+    row per operation with the exact reason when something is off
+    (find text missing, target exists, path escaping the project…).
+  • Apply now writes the changes: CREATE new scripts (a .cs without
+    content gets a MonoBehaviour starter), MODIFY via exact
+    find→replace or full-file content, DELETE (the .meta sidecar
+    goes too), MOVE (the .meta follows, GUID survives).
+  • Open buffers are respected: patches apply to what you SEE
+    (unsaved edits included), the model updates in ONE undo step
+    (Ctrl+Z reverts the agent), and each file's CRLF/LF ending is
+    preserved. The brain re-analyzes what changed — squiggles,
+    problems bar and stats refresh immediately.
+  • A copyable REPORT summarizes every op — paste it back into the
+    chat so the agent can correct itself on the next turn.
+  • SAFETY: paths must stay inside the workspace (no .., no drive
+    letters), only text extensions, ops and sizes capped. Web-LLM
+    dialects are tolerated (new/edit/remove/rename aliases, missing
+    protocol marker, find-without-replace).
+
+▲ MCP AGENTS GET WRITE ACCESS TOO
+  • The local MCP server now exposes apply_payload — the same
+    engine behind the Apply window — so Cursor/Claude Desktop/etc.
+    can fix files in one call. Six tools in total now.
 
 WHAT'S NEW IN PHASE 15 — FULL C# + UNITY PREPROCESSOR + SYMBOL AUTOCOMPLETE
 ───────────────────────────────────────────────────────────────────────────
@@ -36,7 +82,7 @@ WHAT'S NEW IN PHASE 15 — FULL C# + UNITY PREPROCESSOR + SYMBOL AUTOCOMPLETE
 ▲ TYPO PROTECTION: an unknown directive warns with a hint — "#regiong"
   suggests #region; "#ifdef" suggests #if (C# has no #ifdef!). A
   #define placed after real code errors CS1032 with a fix hint.
-WHAT'S NEW IN PHASE 14 — REAL FIND-IN-FILES + AI AGENTS (MCP)
+STILL ALL OF PHASE 14 — REAL FIND-IN-FILES + AI AGENTS (MCP)
 ─────────────────────────────────────────────────────────────
 ▲ FIND IN PROJECT FILES (Ctrl+Shift+F) — now worth using
   • Live search as you type across EVERY script in the project.
@@ -161,17 +207,17 @@ rename.
 
 VERIFICATION THAT SHIPPED WITH THIS BUILD
 ─────────────────────────────────────────
-• 205 engine assertions — including 14 new Phase 14 tests pinning
-  the search options, the coverage report and the MCP payload
-  formatters — all green.
-• 16-fixture crash-battery probe (0 throws, all invariants) +
-  93 compiled-dist feature markers — all green.
-• 22/22 E2E against the REAL Neutralino server: the search panel
-  (live results, case toggle, jump, coverage scan) and the FULL
-  MCP loop — stdio proxy → server → live editor page → all five
-  tools answering real workspace data, default discovery too.
-• CI/CD: GitHub Actions tested every push and builds the release
-  zip automatically on the v14.0.0 tag.
+• 239 engine assertions — including 17 new Phase 16 tests pinning the
+  payload guard (traversal/drive/absolute), the planner (create
+  conflicts, find misses, delete-missing), a REAL temp-dir apply
+  (create/modify/delete/move + report) and the structure export
+  (folder selection, fences, truncation) — all green.
+• 116 compiled-dist feature markers — all green.
+• 19/19 browser E2E: titlebar buttons, folder tree + presets + fences,
+  clipboard round-trips, validate/apply with the copyable report,
+  traversal rejection, MCP apply_payload OK + refusal.
+• CI/CD: GitHub Actions tests every push and builds the release zip
+  automatically on the v16.0.0 tag.
 
 TROUBLESHOOTING
 ───────────────

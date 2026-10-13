@@ -37,6 +37,7 @@ export const MCP_TOOL_NAMES = [
   "search_code",
   "get_file",
   "get_workspace_summary",
+  "apply_payload",
 ] as const;
 
 /** tool descriptions — mirrored in mcp/README.md and tools/list */
@@ -46,6 +47,7 @@ export const MCP_TOOL_DESCRIPTIONS: Record<string, string> = {
   search_code: "Search code across the whole project — the same engine as the editor's Ctrl+Shift+F find-in-files. Supports literal, whole-word and regular-expression queries, case sensitivity, and a result cap. Returns path:line:col plus the matched source line.",
   get_file: "Read a workspace file's content (optionally one line range). Prefers the live editor buffer when the file is open with unsaved changes and flags that in the response.",
   get_workspace_summary: "One-shot overview: workspace root, file/script counts, error/warning totals, assemblies, Unity API status, VelvetSharp phase — the first thing an agent should call.",
+  apply_payload: "Apply changes to the workspace in ONE call: create / modify / delete / move text files — the same engine as the editor's Agent Bridge window (web AI agents get it via copy-paste). modify takes either full replacement content or an exact find/replace pair. Returns a per-operation report; blocked operations (missing find text, existing targets) never execute.",
 };
 
 /** max characters of any single text payload on the wire */
@@ -149,6 +151,29 @@ async function dispatchTool(tool: string, args: any): Promise<any> {
       ];
       return { text: lines.join("\n") };
     }
+    case "apply_payload": {
+      // Phase 16 — same applier the Agent Bridge modal uses (window.__vsAgent,
+      // wired in App.tsx). Accepts the payload as an object or a JSON string.
+      const runner = (window as any).__vsAgent?.apply as
+        | ((raw: unknown) => Promise<{ ok: boolean; summary?: { report: string; applied: number; failed: number }; errors?: string[]; warnings?: string[] }>)
+        | undefined;
+      if (!runner) throw new Error("the apply engine is not ready yet (editor still booting?)");
+      let raw: unknown = args?.payload;
+      if (typeof raw === "string") {
+        try { raw = JSON.parse(raw); } catch (e) {
+          throw new Error(`payload is not valid JSON — ${String((e as Error)?.message ?? e)}`);
+        }
+      }
+      if (raw == null) throw new Error('apply_payload needs "payload" — the Agent Payload object (or its JSON)');
+      const res = await runner(raw);
+      if (!res.ok) throw new Error((res.errors ?? ["payload rejected"]).join(" | "));
+      return {
+        text: res.summary!.report,
+        applied: res.summary!.applied,
+        failed: res.summary!.failed,
+        warnings: res.warnings ?? [],
+      };
+    }
     default:
       throw new Error(`unknown tool "${tool}" — available: ${MCP_TOOL_NAMES.join(", ")}`);
   }
@@ -198,18 +223,14 @@ export async function refreshMcpDiscovery(): Promise<void> {
 /** start listening for MCP requests (desktop only; idempotent) */
 export function startMcpServer(): void {
   try {
-    if (listening) return;
-    if (typeof window === "undefined" || !("NL_PORT" in window)) return; // browser demo
-    listening = true;
-    onBridgeEvent("vsMcpRequest", (data: any) => { void handleRequest(data); });
-    void refreshMcpDiscovery();
-    void mcpDiscoveryPath().then((p) => { (window as any).__vsMcpDiscoveryPath = p || null; });
-    // debug/test surface (E2E drives tools through this without a WS hop)
+    // debug/test surface (E2E drives tools through this without a WS hop).
+    // Available in the browser too: dispatch itself is environment-independent
+    // (store + adapter only) — only the WS listener needs the native shell.
     (window as any).__vsMcp = {
       status: (): McpStatus => ({
         listening,
         port: Number((window as any).NL_PORT) || null,
-        pid: Number((window as any).NL_PID) || null,
+        pid: Number.isFinite(Number((window as any).NL_PID)) ? Number((window as any).NL_PID) : null,
         root: getAdapter().root || null,
         discoveryPath: (window as any).__vsMcpDiscoveryPath ?? null,
         tools: [...MCP_TOOL_NAMES],
@@ -217,6 +238,12 @@ export function startMcpServer(): void {
       }),
       dispatch: (tool: string, args: any) => dispatchTool(tool, args),
     };
+    if (listening) return;
+    if (typeof window === "undefined" || !("NL_PORT" in window)) return; // browser demo
+    listening = true;
+    onBridgeEvent("vsMcpRequest", (data: any) => { void handleRequest(data); });
+    void refreshMcpDiscovery();
+    void mcpDiscoveryPath().then((p) => { (window as any).__vsMcpDiscoveryPath = p || null; });
   } catch (e: any) {
     lastError = String(e?.message ?? e);
   }

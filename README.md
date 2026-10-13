@@ -26,10 +26,12 @@ Unity scripts are small, but the IDEs people use for them are not. VelvetSharp s
 - **Full C# + Unity preprocessor (Phase 11 + 15)** — Unity's full define set + the `UNITY_<year>_<minor>_OR_NEWER` chain from ProjectVersion.txt + your custom `scriptingDefineSymbols`; inactive `#if` branches are dimmed and silent, `#pragma warning disable` honored, `#error`/`#warning` surfaced, stray directives diagnosed. **Typing `#` completes all 13 real C# directives** (usage + docs in the tooltip, self-closing `#if … #endif` / `#region … #endregion` snippets); **`#if `/`#elif `/`#define `/`#undef ` complete the whole symbol world, labelled by source** — Unity built-ins, version symbols, csproj DefineConstants, Player Settings scriptingDefineSymbols, `Assets/csc.rsp`/`mcs.rsp` `-define:` flags, and every `#define` in your code with its file+line define sites; hovering a directive symbol explains where it comes from; `#pragma warning`/`#nullable`/`#line` complete their keywords; unknown directives warn with a did-you-mean hint (`#ifdef` → `#if` — C# has no `#ifdef`); `#define` after the first token errors CS1032
 
 - **Hover docs + signature help** straight from `UnityEngine.xml` and the extracted BCL/Unity databases
+- **Agent Bridge — work hands-on with web AI (Phase 16)** — the titlebar hosts `⧉ Structure → AI` and `⇩ Apply JSON ← AI` (and the theme ◐ chip moved up from the bottom bar). **Structure → AI**: a folder tree with tri-state checkboxes — you pick the folders and sub-folders — presets, a path filter and optional fenced `csharp` file contents produce a paste-ready brief for ANY web LLM (ChatGPT, Claude, Gemini — the ones that cannot reach local MCP); **Apply JSON ← AI**: paste the agent's JSON reply and VelvetSharp validates it (dry-run plan with a green/red row + exact reason per op), then creates / modifies (exact find→replace or full content) / deletes / moves the scripts itself — .meta sidecars handled, open buffers patched in one undo step, CRLF/LF preserved, the brain re-analyzes instantly — and hands you a copyable report to paste back into the chat. Paths are sandboxed to the workspace, only text files, op/size caps; web-LLM dialects (op aliases, missing marker) are tolerated. The local MCP server gains `apply_payload` — same engine, so MCP agents get one-call write access too
 - **Go-to-definition (F12) + find-all-references (Shift+F12)** — a Problems-style panel lists every use *and where it comes from*, click to jump; navigation history (Alt+Left/Right) remembers every jump
 - **Project-wide rename (F2)** — every reference in every file, meta files included
 
 ![Preprocessor completions](docs/screenshots/preproc-completion.png)
+![Agent Bridge — structure window](docs/screenshots/agent-bridge-structure.png)
 
 ### Graphs
 - **⬡ Dependency graph** — project types only (classes / structs / interfaces / enums), 4 layouts (hierarchical, organic, circular, business), folder scoping, optional Unity/BCL externals, static-singleton badges with self-loops
@@ -131,6 +133,8 @@ The engine suite covers parsing, symbol extraction, type inference, completions,
 | 12 | 12.0.0 | two-lane brain, worker crash recovery, the autocomplete range-bug root fix, bridge replay + heartbeat |
 | 13 | 13.0.0 | call flow = only your custom methods (+ hidden-call chip), cross-file terminals, per-caller 1·2·3 call-order badges, self-sizing boxes, copyable graph errors + render-crash containment |
 | **14** | **14.0.0** | **real find-in-files (Ctrl+Shift+F: live search, case/whole-word/regex, match highlighting, honest “not scanned yet → scan & re-run” coverage) + MCP server so AI agents can pull problems / structure / code search / file contents from the running editor** |
+| **15** | **15.0.0** | **full C# + Unity preprocessor — all 13 directives + the whole define world (Unity built-ins, version chain, csproj/scripting/rsp/code defines) autocomplete with sources, hover explains symbols, did-you-mean + CS1032** |
+| **16** | **16.0.0** | **Agent Bridge — titlebar LLM buttons: copy the project structure (pick folders/sub-folders, optional code contents) to any web AI, paste its JSON payload back to auto create/modify/delete/move scripts with a copyable report; MCP gains apply_payload write access** |
 
 Full details in [VERSIONS.md](VERSIONS.md).
 

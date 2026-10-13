@@ -14,6 +14,11 @@ import { readCache, writeCache, statFiles, fingerprintChanged, cacheEnabled, CAC
 import { UNITY_LIFECYCLE, UNITY_MESSAGE_NAMES } from "@brain/snippets";
 import { detectEol, convertEol, eolOfMonaco, splitLines, joinLines, type Eol } from "./eol";
 import { dedupeProblems, problemToText } from "./problems";
+import {
+  normalizePayload, planPayload, applyPayload, buildFileTree, expandSelection, selectionState,
+  buildStructureExport, AGENT_INSTRUCTIONS,
+  type AgentPayload, type OpResult, type NormalizedPayload, type PayloadIo, type TreeNode, type ApplySummary,
+} from "./agent-bridge";
 import { hydrateConfigFromDisk, configFilePath, mcpDiscoveryPath, saveConfigField } from "./configStore";
 import { getBridgeState, subscribeBridge, bridgeStats, bridgeSelfTest, forceReconnect, type BridgeState } from "./nl-bridge";
 import { startMcpServer, refreshMcpDiscovery } from "./mcp-server";
@@ -663,6 +668,24 @@ function App() {
         <span className="subtitle">{APP_LABEL} · lightweight Unity C# IDE</span>
         <span className="titlebar-right">
           {browserAdapter.name === "browser-demo" ? "demo workspace" : "local workspace"}
+          {/* Phase 16 (user request) — LLM managing buttons live UP TOP, not in
+              the bottom bar: copy structure to a web AI agent / apply its JSON */}
+          <button
+            className="settings-btn ai-btn"
+            title="Agent Bridge → copy the project structure (pick folders/sub-folders) to a web AI agent"
+            onClick={() => useStore.getState().setAgentBridge({ tab: "structure" })}
+          >⧉ Structure → AI</button>
+          <button
+            className="settings-btn ai-btn"
+            title="Agent Bridge ← paste a JSON payload from a web AI agent — VelvetSharp creates/modifies the scripts automatically"
+            onClick={() => useStore.getState().setAgentBridge({ tab: "apply" })}
+          >⇩ Apply JSON ← AI</button>
+          {/* theme chip moved up from the bottom bar (Phase 16, same request) */}
+          <button
+            className="settings-btn"
+            title="Color theme — click to change"
+            onClick={() => useStore.getState().setThemePicker({ firstRun: false })}
+          >◐</button>
           {/* v0.7.1 — dedicated settings entry point (user request: top settings button) */}
           <button
             className="settings-btn"
@@ -679,6 +702,7 @@ function App() {
       {palette && <Palette key={palette} />}
       <PathPromptModal />
       <ThemePicker />
+      <AgentBridgeModal />
       <RenameWidget />
       <ExplorerCtxMenu />
       <EditorCtxMenu />
@@ -996,6 +1020,116 @@ async function deleteEntry(path: string, isDir: boolean): Promise<void> {
     st.setStatus("delete failed: " + String(e?.message ?? e));
   }
 }
+
+/* ------------- Phase 16 — Agent Bridge apply (modal + MCP share this) ------------- */
+
+/** agentPayloadIo — the PayloadIo surface over the REAL workspace. Fresh per
+ *  apply (the EOL memory is per-run). Buffer-first + EOL-safe: */
+function agentPayloadIo(): PayloadIo {
+  const eolCache = new Map<string, Eol>();
+  const tabOf = (p: string) => useStore.getState().tabs.find((t) => t.path === p);
+  const modelOf = (p: string): any => {
+    const m = monaco.editor.getModels().find((mm: any) =>
+      keyOf(decodeURIComponent(mm.uri.path).replace(/^\//, "")) === keyOf(p));
+    return m ?? null;
+  };
+  return {
+    exists: async (p) => useStore.getState().files.includes(p) || !!tabOf(p),
+    read: async (p) => {
+      const t = tabOf(p);
+      const rawText = t ? t.content : await getAdapter().read(p);
+      const eol = detectEol(rawText);
+      eolCache.set(p, eol);
+      return convertEol(rawText, "\n"); // match the payload's \n dialect
+    },
+    write: async (p, content) => {
+      const eol = eolCache.get(p) ?? "\n";
+      const fileText = convertEol(content, eol);
+      const model = modelOf(p);
+      if (model) {
+        // one undo step for the whole replacement — Ctrl+Z reverts the agent
+        model.pushEditOperations([], [{ range: model.getFullModelRange(), text: fileText }], () => null);
+        await getAdapter().write(p, model.getValue());
+        useStore.getState().updateContent(p, model.getValue());
+      } else {
+        await getAdapter().write(p, fileText);
+      }
+      useStore.getState().markSaved(p);
+    },
+    move: async (from, to) => {
+      const adapter = getAdapter();
+      if (!adapter.rename) throw new Error("this workspace cannot move files");
+      const model = modelOf(from);
+      if (model) await adapter.write(from, model.getValue()); // flush buffer first
+      await adapter.rename(from, to);
+      const meta = from + ".meta";
+      if (useStore.getState().files.includes(meta)) {
+        try { await adapter.rename(meta, to + ".meta"); } catch { /* sidecar best effort */ }
+      }
+      const t = tabOf(from);
+      if (t) {
+        useStore.getState().closeTab(from);
+        useStore.getState().openFile(to, t.content);
+      }
+    },
+    remove: async (p) => {
+      const adapter = getAdapter();
+      if (!adapter.remove) throw new Error("this workspace cannot delete files");
+      await adapter.remove(p, false);
+      const meta = p + ".meta";
+      if (useStore.getState().files.includes(meta)) {
+        try { await adapter.remove(meta, false); } catch { /* sidecar best effort */ }
+      }
+      if (tabOf(p)) useStore.getState().closeTab(p);
+    },
+  };
+}
+
+/** applyAgentPayloadToWorkspace — validate + run an agent payload against the
+ *  REAL workspace: creates/modifies/deletes/moves files on disk, keeps open
+ *  buffers (and their undo stacks) in sync, re-analyzes what changed.
+ *  Used by BOTH the Agent Bridge modal and the MCP apply_payload tool. */
+async function applyAgentPayloadToWorkspace(raw: unknown): Promise<{
+  ok: boolean;
+  summary?: ApplySummary;
+  errors?: string[];
+  warnings?: string[];
+}> {
+  const adapter = getAdapter();
+  const client = (window as any).__client as BrainClient | undefined;
+  const norm = normalizePayload(raw);
+  if (!norm.payload) return { ok: false, errors: norm.errors, warnings: norm.warnings };
+  const payload: AgentPayload = norm.payload;
+
+  const summary = await applyPayload(payload, agentPayloadIo());
+
+  // re-analyze modified files from their post-apply text (rescan only covers
+  // NEW files), then one rescan folds creates/deletes/moves into the index
+  const tabOf = (p: string) => useStore.getState().tabs.find((t) => t.path === p);
+  if (client) {
+    for (const p of summary.touched.modified) {
+      try {
+        const content = tabOf(p)?.content ?? await adapter.read(p);
+        const r = await client.updateFile(p, content);
+        syntaxByPath.set(keyOf(p), r.diagnostics);
+        void client.semantic(p, content).then((sem) => { semanticByPath.set(keyOf(p), sem as any); }).catch(() => {});
+      } catch { /* best effort */ }
+    }
+  }
+  if (summary.touched.created.length || summary.touched.deleted.length || summary.touched.moved.length) {
+    await rescanWorkspaceFiles(client);
+  } else if (summary.touched.modified.length) {
+    recomputeProblems();
+    refreshActiveMarkers();
+  }
+  if (summary.applied > 0) applySemanticDecorations((window as any).__editor);
+
+  useStore.getState().setStatus(`agent payload: ${summary.applied} applied${summary.failed ? `, ${summary.failed} failed` : ""}`);
+  return { ok: true, summary, errors: [], warnings: norm.warnings };
+}
+
+// MCP dispatcher (mcp-server.ts) reuses the SAME applier — one engine, two doors
+(window as any).__vsAgent = { apply: applyAgentPayloadToWorkspace, io: agentPayloadIo };
 
 async function renameEntry(path: string, isDir: boolean, newName: string): Promise<void> {
   const adapter = getAdapter();
@@ -2248,14 +2382,7 @@ function StatusBar() {
       >
         AS {s.autoSave ? "on" : "off"}
       </button>
-      <button
-        className="asm-chip"
-        style={{ cursor: "pointer" }}
-        title="Color theme — click to change (v0.7.0)"
-        onClick={() => useStore.getState().setThemePicker({ firstRun: false })}
-      >
-        ◐ theme
-      </button>
+      {/* theme chip moved to the TOP titlebar (Phase 16 — user request) */}
       {(s.errors > 0 || warnCount > 0) && (
         <button
           className="err-count"
@@ -2384,6 +2511,8 @@ function Palette() {
     { label: "View: Toggle Explorer", run: () => useStore.getState().setSidebarView("explorer") },
     { label: "Search: Find in Project Files (Ctrl+Shift+F)", run: () => useStore.getState().setSidebarView("search") },
     { label: "AI: MCP Connection Info (for external agents)", run: () => useStore.getState().setSettingsOpen(true) },
+    { label: "AI: Copy Project Structure for a Web Agent (Agent Bridge)", run: () => useStore.getState().setAgentBridge({ tab: "structure" }) },
+    { label: "AI: Apply an Agent JSON Payload (Agent Bridge)", run: () => useStore.getState().setAgentBridge({ tab: "apply" }) },
     { label: "View: Toggle Outline", run: () => useStore.getState().setSidebarView("outline") },
     { label: "View: Toggle .meta visibility", run: () => useStore.getState().toggleHideMeta() },
     { label: "File: Close All Tabs", run: () => { const st = useStore.getState(); st.tabs.forEach((t) => st.closeTab(t.path)); } },
@@ -2806,6 +2935,318 @@ function ErrorPopup() {
           <button className="btn btn-primary" onClick={() => useStore.getState().dismissErrorPopup()}>dismiss</button>
         </div>
         <div className="error-popup-hint">this popup appears whenever an internal error happens — paste the copied details into a bug report so it can be fixed precisely</div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Phase 16 — Agent Bridge modal (web LLM hand-off) ---------------- */
+
+/** clipboard with the proven three-step fallback chain (ProblemsBar parity):
+ *  async API → native Neutralino clipboard (raced 2.5 s) → execCommand */
+async function copyAgentText(text: string): Promise<boolean> {
+  let ok = false;
+  try { await navigator.clipboard.writeText(text); ok = true; } catch { /* fall through */ }
+  if (!ok) {
+    try {
+      const res: boolean = await Promise.race([
+        import("./nl-bridge").then((m: any) => m?.clipboard?.writeText?.(text)).then(() => true).catch(() => false),
+        new Promise<boolean>((res) => setTimeout(() => res(false), 2500)),
+      ]);
+      ok = res === true;
+    } catch { /* not available */ }
+  }
+  if (!ok) {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+    } catch { ok = false; }
+  }
+  return ok;
+}
+
+const AGENT_EXAMPLE_JSON = `{
+  "velvetsharp": 1,
+  "agent": "ChatGPT",
+  "message": "adds Dash.cs and a dashSpeed field to PlayerController",
+  "operations": [
+    { "op": "create", "path": "Assets/Scripts/Player/Dash.cs", "content": "using UnityEngine;\\n\\npublic class Dash : MonoBehaviour\\n{\\n    [SerializeField] private float speed = 18f;\\n\\n    void Update()\\n    {\\n        if (Input.GetKeyDown(KeyCode.LeftShift))\\n            transform.Translate(Vector3.forward * speed * Time.deltaTime);\\n    }\\n}\\n" },
+    { "op": "modify", "path": "Assets/Scripts/Player/PlayerController.cs", "find": "[SerializeField] private float moveSpeed = 5f;", "replace": "[SerializeField] private float moveSpeed = 5f;\\n    [SerializeField] private float dashSpeed = 18f;", "all": false }
+  ]
+}`;
+
+function AgentBridgeModal() {
+  const open = useStore((s) => s.agentBridge);
+  const files = useStore((s) => s.files);
+  const [tab, setTab] = useState<"structure" | "apply">("structure");
+  const [checked, setChecked] = useState<Set<string>>(new Set());
+  const [includeCode, setIncludeCode] = useState(false);
+  const [showMeta, setShowMeta] = useState(false);
+  const [filter, setFilter] = useState("");
+  const [jsonText, setJsonText] = useState("");
+  const [norm, setNorm] = useState<NormalizedPayload | null>(null);
+  const [planRows, setPlanRows] = useState<OpResult[] | null>(null);
+  const [report, setReport] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [copiedFlag, setCopiedFlag] = useState("");
+  const [contentsCache, setContentsCache] = useState<Map<string, string> | null>(null);
+
+  // sync tab + prime selection with every non-meta file on open
+  useEffect(() => {
+    if (!open) return;
+    setTab(open.tab);
+    setReport(""); setNorm(null); setPlanRows(null); setCopiedFlag("");
+    setChecked((prev) => (prev.size ? prev : new Set(files.filter((f) => !f.endsWith(".meta")))));
+  }, [open, open?.tab, files]);
+
+  // Esc closes the bridge (same courtesy as the palette)
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") useStore.getState().setAgentBridge(null);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [open]);
+
+  // gather selected file contents for the "include code" mode (buffer-first)
+  useEffect(() => {
+    if (!open || !includeCode) { setContentsCache(null); return; }
+    let alive = true;
+    void (async () => {
+      const sel = expandSelection(files.filter((f) => !f.endsWith(".meta")), checked);
+      const m = new Map<string, string>();
+      const adapter = getAdapter();
+      const buffers = new Map(useStore.getState().tabs.map((t) => [t.path, t.content]));
+      for (const p of sel) {
+        if (buffers.has(p)) { m.set(p, buffers.get(p)!); continue; }
+        try { m.set(p, await adapter.read(p)); } catch { m.set(p, "(unreadable)"); }
+      }
+      if (alive) setContentsCache(m);
+    })();
+    return () => { alive = false; };
+  }, [open, includeCode, checked, files]);
+
+  if (!open) return null;
+
+  // NOTE: plain computation, NOT useMemo — these run after the early return,
+  // so hook order would flip between open/closed renders (rules of hooks)
+  const filterLc = filter.trim().toLowerCase();
+  const visibleFiles = filterLc
+    ? files.filter((f) => (showMeta || !f.endsWith(".meta")) && f.toLowerCase().includes(filterLc))
+    : files.filter((f) => showMeta || !f.endsWith(".meta"));
+  const tree = buildFileTree(visibleFiles);
+  const selectedFiles = expandSelection(files, checked);
+  const rootLabel = getAdapter().root ? baseName(getAdapter().root) : "Unity project";
+  const exportInfo = buildStructureExport(visibleFiles, checked, {
+    includeCode,
+    read: includeCode && contentsCache ? (p) => contentsCache.get(p) ?? "(loading…)" : undefined,
+    rootLabel,
+  });
+  const isDemo = getAdapter().name === "browser-demo";
+
+  const toggleNode = (node: TreeNode) => {
+    setChecked((prev) => {
+      const next = new Set(prev);
+      if (node.dir) {
+        if (next.has(node.path)) {
+          next.delete(node.path);
+          for (const c of [...next]) if (c.startsWith(node.path + "/")) next.delete(c);
+        } else {
+          next.add(node.path);
+        }
+      } else if (next.has(node.path)) {
+        next.delete(node.path);
+      } else {
+        next.add(node.path);
+      }
+      return next;
+    });
+  };
+
+  // parse the paste box per render (JSON.parse of a paste-sized text is trivial)
+  let parsedRaw: any = null;
+  if (jsonText.trim()) {
+    try { parsedRaw = JSON.parse(jsonText); } catch (e) { parsedRaw = { __parseError: String(e) }; }
+  }
+
+  const flashCopied = (what: string, ok: boolean) => {
+    setCopiedFlag(ok ? `${what} copied ✓` : "copy failed — select the text and Ctrl+C");
+    setTimeout(() => setCopiedFlag(""), 2600);
+  };
+
+  const doValidate = async () => {
+    setReport("");
+    if (parsedRaw && typeof parsedRaw === "object" && "__parseError" in (parsedRaw as any)) {
+      setNorm({ payload: null, errors: [`not valid JSON — ${(parsedRaw as any).__parseError}`], warnings: [] });
+      setPlanRows(null);
+      return;
+    }
+    const n = normalizePayload(parsedRaw);
+    setNorm(n);
+    if (!n.payload) { setPlanRows(null); return; }
+    setBusy(true);
+    try {
+      setPlanRows(await planBridge(n.payload));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // dry-run through the REAL io surface (buffer-preferred) without writing
+  const planBridge = async (payload: AgentPayload): Promise<OpResult[]> => {
+    const ioFactory = (window as any).__vsAgent?.io;
+    const io = ioFactory ? ioFactory() : null;
+    return io ? planPayload(payload, io) : [];
+  };
+
+  const doApply = async () => {
+    if (busy || !parsedRaw) return;
+    setBusy(true);
+    try {
+      const res = await applyAgentPayloadToWorkspace(parsedRaw);
+      if (!res.ok) {
+        setNorm({ payload: null, errors: res.errors ?? ["payload rejected"], warnings: res.warnings ?? [] });
+        setPlanRows(null);
+        setReport("");
+      } else {
+        setNorm({ payload: normalizePayload(parsedRaw).payload, errors: [], warnings: res.warnings ?? [] });
+        setPlanRows(res.summary!.results);
+        setReport(res.summary!.report);
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const TreeRow = ({ node, depth }: { node: TreeNode; depth: number }) => {
+    const st = selectionState(node, checked);
+    const box = st === "on" ? "☑" : st === "mixed" ? "◪" : "☐";
+    return (
+      <>
+        <div className="ab-tree-row" style={{ paddingLeft: 4 + depth * 16 }}>
+          <button className="ab-check" title={node.dir ? "check = include this folder and everything under it" : "check = include this file"}
+            onClick={() => toggleNode(node)}>{box}</button>
+          <span className={"ab-tree-name" + (node.dir ? " dir" : "")} onClick={() => toggleNode(node)}>
+            {node.dir ? "▸ " : ""}{node.name}{node.dir ? "/" : ""}
+          </span>
+          {includeCode && !node.dir && <span className="ab-size">{(contentsCache?.get(node.path)?.length ?? 0).toLocaleString()} ch</span>}
+        </div>
+        {node.children.map((c) => <TreeRow key={c.path} node={c} depth={depth + 1} />)}
+      </>
+    );
+  };
+
+  return (
+    <div className="overlay" onClick={() => useStore.getState().setAgentBridge(null)}>
+      <div className="modal agent-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="ab-header">
+          <span className="ab-title">🤖 Agent Bridge — hand-off with web AI assistants</span>
+          <span className="ab-tabs">
+            <button className={"ab-tab" + (tab === "structure" ? " on" : "")} onClick={() => setTab("structure")}>⧉ Structure → AI</button>
+            <button className={"ab-tab" + (tab === "apply" ? " on" : "")} onClick={() => setTab("apply")}>⇩ Apply JSON ← AI</button>
+          </span>
+          <button className="settings-btn" title="close (Esc)" onClick={() => useStore.getState().setAgentBridge(null)}>✕</button>
+        </div>
+
+        {tab === "structure" ? (
+          <div className="ab-body">
+            <div className="ab-hint">
+              Pick the folders / sub-folders to share, copy the text, and paste it into any web AI
+              (ChatGPT, Claude, Gemini…). The <b>instructions</b> button also copies the JSON contract
+              so the agent can reply with a payload this editor can apply.
+            </div>
+            <div className="ab-toolbar">
+              <span className="ab-preset-label">presets:</span>
+              <button className="btn" onClick={() => setChecked(new Set(files.filter((f) => !f.endsWith(".meta"))))}>all</button>
+              <button className="btn" onClick={() => setChecked(new Set())}>none</button>
+              <button className="btn" onClick={() => setChecked(new Set(files.filter((f) => f.endsWith(".cs"))))}>scripts (.cs) only</button>
+              <input className="ab-filter" placeholder="filter paths…" value={filter} onChange={(e) => setFilter(e.target.value)} />
+              <label className="ab-opt" title="appends every selected file's code as fenced blocks — needed when the agent must edit exact code">
+                <input type="checkbox" checked={includeCode} onChange={(e) => setIncludeCode(e.target.checked)} /> include file contents
+              </label>
+              <label className="ab-opt" title=".meta files are noise for most agents — enable to share them too">
+                <input type="checkbox" checked={showMeta} onChange={(e) => setShowMeta(e.target.checked)} /> show .meta
+              </label>
+            </div>
+            <div className="ab-tree">
+              {tree.length === 0 && <div className="ab-empty">no files match the filter</div>}
+              {tree.map((n) => <TreeRow key={n.path} node={n} depth={0} />)}
+            </div>
+            <div className="ab-export-head">
+              <span>
+                {selectedFiles.length} file{selectedFiles.length === 1 ? "" : "s"} selected · {exportInfo.chars.toLocaleString()} chars
+                {exportInfo.truncated && <b className="ab-warn-text"> — truncated, unselect folders or paste in parts</b>}
+                {includeCode && !contentsCache && <span className="ab-warn-text"> — reading contents…</span>}
+              </span>
+              {isDemo && <span className="ab-warn-text">demo workspace — open a real project for payloads to write to disk</span>}
+            </div>
+            <textarea className="ab-output" readOnly value={exportInfo.text} onFocus={(e) => e.currentTarget.select()} />
+            <div className="ab-actions">
+              <button className="btn" onClick={async () => flashCopied("instructions", await copyAgentText(AGENT_INSTRUCTIONS))}>ⓘ Copy agent instructions</button>
+              <span className="ab-spacer" />
+              <button className="btn btn-primary" onClick={async () => flashCopied("structure", await copyAgentText(exportInfo.text))}>⧉ Copy to clipboard</button>
+            </div>
+          </div>
+        ) : (
+          <div className="ab-body">
+            <div className="ab-hint">
+              Paste the JSON your AI agent replied with (it helps to paste the <b>agent instructions</b>
+              from the Structure tab along with your code). <b>Validate</b> dry-runs every operation;
+              <b> Apply now</b> writes the changes to your project and produces a copyable report.
+            </div>
+            <textarea
+              className="ab-input" spellCheck={false}
+              placeholder={`{\n  "velvetsharp": 1,\n  "agent": "…",\n  "message": "…",\n  "operations": [\n    { "op": "create", "path": "Assets/Scripts/Foo.cs", "content": "…" },\n    { "op": "modify", "path": "…", "find": "…", "replace": "…" }\n  ]\n}`}
+              value={jsonText} onChange={(e) => { setJsonText(e.target.value); setNorm(null); setPlanRows(null); setReport(""); }}
+            />
+            <div className="ab-actions">
+              <button className="btn" onClick={() => { setJsonText(AGENT_EXAMPLE_JSON); setNorm(null); setPlanRows(null); setReport(""); }}>insert example</button>
+              <button className="btn" onClick={() => { setJsonText(""); setNorm(null); setPlanRows(null); setReport(""); }}>clear</button>
+              <button className="btn" disabled={busy || !jsonText.trim()} onClick={() => void doValidate()}>{busy ? "…" : "validate"}</button>
+              <button className="btn" onClick={async () => flashCopied("instructions", await copyAgentText(AGENT_INSTRUCTIONS))}>ⓘ Copy agent instructions</button>
+              <span className="ab-spacer" />
+              <button className="btn btn-primary" disabled={busy || !jsonText.trim()} onClick={() => void doApply()}>{busy ? "applying…" : "⇩ Apply now"}</button>
+            </div>
+            {norm && norm.warnings.length > 0 && (
+              <div className="ab-warns">
+                {norm.warnings.map((w, i) => <div key={i} className="ab-warn-row">⚠ {w}</div>)}
+              </div>
+            )}
+            {norm && norm.errors.length > 0 && (
+              <div className="ab-errs">
+                {norm.errors.map((w, i) => <div key={i} className="ab-err-row">✖ {w}</div>)}
+              </div>
+            )}
+            {planRows && planRows.length > 0 && (
+              <div className="ab-plan">
+                <div className="ab-plan-title">plan — {planRows.filter((r) => r.ok).length} ok, {planRows.filter((r) => !r.ok).length} blocked</div>
+                {planRows.map((r) => (
+                  <div key={r.index} className={"ab-plan-row " + (r.ok ? "ok" : "bad")}>
+                    <span className="ab-plan-dot">{r.ok ? "●" : "✖"}</span>
+                    <span className="ab-plan-op">{r.op}</span>
+                    <span className="ab-plan-path" title={r.path}>{r.path}</span>
+                    <span className="ab-plan-detail" title={r.detail}>{r.detail}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {report && (
+              <div className="ab-report">
+                <div className="ab-plan-title">report (paste this back to the agent)</div>
+                <pre className="ab-report-text">{report}</pre>
+                <div className="ab-actions">
+                  <button className="btn" onClick={async () => flashCopied("report", await copyAgentText(report))}>⧉ Copy report</button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {copiedFlag && <div className="ab-copied">{copiedFlag}</div>}
       </div>
     </div>
   );

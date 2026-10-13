@@ -165,6 +165,22 @@ check("preproc: CS1032 define-after-code guard", js.includes("after the first to
 check("preproc: csc.rsp / mcs.rsp defines scanned", /csc|mcs.*rsp/.test(js) && js.includes("define:"));
 check("preproc: hover explains directive symbols", js.includes("#if ") && /ppSymbolMd|Defined in:/.test(js));
 
+// 4m. Phase 16 — Agent Bridge: web LLM hand-off (structure → AI, JSON payload → editor)
+check("agent bridge: top-bar buttons (Structure → AI / Apply JSON ← AI)", js.includes("Structure → AI") && js.includes("Apply JSON ← AI"));
+check("agent bridge: modal with the two windows", /ab-tab/.test(js) && js.includes("Agent Bridge"));
+check("agent bridge: payload engine shipped", js.includes("protocol marker missing") && js.includes("MonoBehaviour starter template will be used"));
+check("agent bridge: payload validation (traversal guard)", js.includes("workspace-relative") && js.includes("no drive letters"));
+check("agent bridge: create/modify/delete/move operations", js.includes('create"') && js.includes("find text not found") && js.includes("its .meta sidecar"));
+check("agent bridge: dry-run plan + copyable report", js.includes("paste this report back") && js.includes("plan —"));
+check("agent bridge: folder tree with tri-state checkboxes", /ab-tree-row/.test(js) && js.includes("check = include this folder"));
+check("agent bridge: include-contents export with fences", js.includes("include file contents") && js.includes("file contents truncated at"));
+check("agent bridge: copy fallback chain (3 steps)", js.includes("execCommand"));
+check("agent bridge: palette entries", js.includes("AI: Copy Project Structure for a Web Agent (Agent Bridge)") && js.includes("AI: Apply an Agent JSON Payload (Agent Bridge)"));
+check("MCP: apply_payload registered (6 tools)", js.includes("apply_payload"));
+check("MCP: apply_payload tool schema in stdio server", fs.readFileSync(path.join(ROOT, "mcp", "server.mjs"), "utf8").includes("apply_payload"));
+check("MCP: README documents the Agent Bridge", fs.readFileSync(path.join(ROOT, "mcp", "README.md"), "utf8").includes("Agent Bridge"));
+check("theme chip lives in the titlebar now (moved up from the bottom bar)", js.includes("Color theme — click to change") && !/◐ theme/.test(js));
+
 // 5. no stale references to removed APIs
 check("no defineVelvetTheme remnant (theme system replaced it)", !js.includes("defineVelvetTheme"));
 

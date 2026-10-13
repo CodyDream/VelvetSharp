@@ -167,6 +167,20 @@ const TOOLS = [
     description: "One-shot overview of the workspace: root, file/script counts, error/warning totals, assemblies, Unity API status. Call this first.",
     inputSchema: { type: "object", properties: {} },
   },
+  {
+    name: "apply_payload",
+    description: "Apply a VelvetSharp Agent Payload: create / modify / delete / move workspace files in ONE call, exactly like the editor's Agent Bridge window does for web AI agents. modify takes either full replacement 'content' or an exact 'find'/'replace' pair. Every operation is planned first (missing find text, existing create targets, collisions are blocked); the response is a copyable per-operation report. Paths are workspace-relative with forward slashes; text files only.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        payload: {
+          oneOf: [{ type: "object" }, { type: "string" }],
+          description: "the Agent Payload object (or a JSON string of it): { velvetsharp: 1, agent, message, operations: [ {op:'create',path,content,overwrite?} | {op:'modify',path,find,replace,all?} | {op:'modify',path,content} | {op:'delete',path} | {op:'move',from,to} ] }",
+        },
+      },
+      required: ["payload"],
+    },
+  },
 ];
 
 /* ------------------------------ WebSocket client ------------------------------
