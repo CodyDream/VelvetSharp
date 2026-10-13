@@ -2,7 +2,7 @@
 
 **A lightweight, fast-opening Unity C# IDE — a portable alternative to Rider, Visual Studio and VS Code.**
 
-*Phase 13 · build 13.0.0 — the phase is always visible in the status bar; every release bumps it by one (see [VERSIONS.md](VERSIONS.md)).*
+*Phase 14 · build 14.0.0 — the phase is always visible in the status bar; every release bumps it by one (see [VERSIONS.md](VERSIONS.md)).*
 
 Zero .NET runtime. Zero OmniSharp. Zero Electron. The entire C# intelligence engine ("the brain") is custom-built in TypeScript, runs off the UI thread in **two Web Workers** (an interactive lane + an analysis lane), on tree-sitter (WASM) + a Unity API database extracted straight from `UnityEngine.dll` by our own ECMA-335 metadata reader. The desktop shell is Neutralino 6.x — the whole portable build opens a Unity project in seconds.
 
@@ -41,9 +41,19 @@ Unity scripts are small, but the IDEs people use for them are not. VelvetSharp s
 ![Dependency graph](docs/screenshots/dependency-graph.png)
 
 ### Workspace
-- Explorer with Unity semantics (`.meta` handling, asmdef badges, folder context menu), search across files, outline, quick open (Ctrl+P), symbol search (Ctrl+T), commands (Ctrl+Shift+P)
+- Explorer with Unity semantics (`.meta` handling, asmdef badges, folder context menu), outline, quick open (Ctrl+P), symbol search (Ctrl+T), commands (Ctrl+Shift+P)
+- **Find in project files (Ctrl+Shift+F)** — live debounced search across every script with case / whole-word / regex toggles, per-file grouping with counts, the matched span highlighted in its line context, Enter jumps to the first hit — and an honest coverage report: files the warm-start cache hasn't loaded yet show up as *“N files not scanned yet — scan & re-run”* instead of being silently missing
 - **Problems bar** sweeping every script in the project — click to jump, Ctrl+click multi-select, right-click → *Copy this problem*
 - **Editor right-click → Collapse ▸** — by Methods / by #Regions / by #if Blocks / XML Doc Comments / All / Expand; **/// + Enter** generates the XML documentation skeleton
+
+### AI agents (MCP)
+- **Built-in Model Context Protocol server** (`mcp/server.mjs`, zero dependencies) — Claude Desktop, Claude Code, Cursor, Cline or any MCP client can ask the **running editor** what it sees and then fix things with their own tools:
+  - `get_problems` — every syntax error / warning the Problems bar shows (including unsaved buffers), compiler-style rows with codes (`File(line,col): ERROR CS1002: …`)
+  - `get_project_structure` — the workspace file tree (optionally scoped to a folder)
+  - `search_code` — the same find-in-files engine as Ctrl+Shift+F (literal / whole-word / regex)
+  - `get_file` — file content or a line range; returns the **live editor buffer** when the file is open with unsaved changes
+  - `get_workspace_summary` — root, file counts, error/warning totals, assemblies — the agent's first call
+- Connection is automatic: the editor publishes `{port, root, token}` to `<dataDir>/VelvetSharp/mcp.json`; point the agent at `mcp/server.mjs` (needs Node 18+) — see [mcp/README.md](mcp/README.md). Everything stays on `127.0.0.1`
 
 ### Shell
 - Neutralino 6.x desktop shell (WebView2 on Windows) — ~2 MB runtime, no installer needed
@@ -80,7 +90,7 @@ Or just **push a `v*` tag** — GitHub Actions builds and publishes the release 
 
 ```
 app/                  React + Monaco UI (vite)
-  src/                editor, explorer, graphs, themes, two-lane workers, store
+  src/                editor, explorer, graphs, themes, two-lane workers, MCP dispatcher, store
   public/api/         UnityEngine + BCL databases (extracted from DLLs)
   public/demo/        bundled demo Unity project
   demo/               the same demo workspace, used by the engine tests
@@ -88,6 +98,7 @@ packages/brain/       the C# engine: parser, index, completions, diagnostics,
                       rename, uses, dependency graph, call flow (2 workers)
 packages/metadata/    ECMA-335 / PE reader + DocXML parser (builds the API DBs)
 desktop/              Neutralino 6.x shell (config + binaries)
+mcp/                  MCP stdio server + agent setup guide (ships in the zip)
 docs/screenshots/     images used by this README
 scripts/              tests, probes, verify markers, E2E harnesses
 ```
@@ -95,11 +106,11 @@ scripts/              tests, probes, verify markers, E2E harnesses
 ## Testing
 
 ```bash
-npm test          # engine suite (191 assertions across 12 suites) + dist markers (80)
+npm test          # engine suite (205 assertions across 13 suites) + dist markers (93)
 npm run test:brain
 ```
 
-The engine suite covers parsing, symbol extraction, type inference, completions, hover, diagnostics, rename, uses, the dependency graph (types-only + singleton self-loops), the call-flow graph (custom-methods-only + cross-file terminals + call-order ranks), snippets, preprocessor semantics and the two-lane light-update contract. A dedicated crash-battery probe throws 16 C# torture fixtures (null-conditional, generics, lambdas, attributes, 400-method cycles, 900-call hubs…) at the engine and asserts zero throws plus structural invariants. Visual E2E (Playwright + Chromium) clicks through the real UI — completions, crash-recovery drills and the Phase 13 call-flow view (badges, widths, cross terminals, copyable errors).
+The engine suite covers parsing, symbol extraction, type inference, completions, hover, diagnostics, rename, uses, the dependency graph (types-only + singleton self-loops), the call-flow graph (custom-methods-only + cross-file terminals + call-order ranks), snippets, preprocessor semantics, the two-lane light-update contract, the find-in-files options + coverage report and the MCP payload formatters. A dedicated crash-battery probe throws 16 C# torture fixtures (null-conditional, generics, lambdas, attributes, 400-method cycles, 900-call hubs…) at the engine and asserts zero throws plus structural invariants. Visual E2E (Playwright + Chromium) clicks through the real UI — completions, crash-recovery drills, the Phase 13 call-flow view and the Phase 14 find-in-files + MCP loop, which is exercised end-to-end against the REAL Neutralino server (browser page + stdio proxy + all five tools, `scripts/e2e-phase14.mjs`).
 
 ## Phase history
 
@@ -115,7 +126,8 @@ The engine suite covers parsing, symbol extraction, type inference, completions,
 | 11 | 11.0.0 | preprocessor directives first-class, Collapse ▸ submenu, /// XML doc generation |
 | 11.1 | 11.1.0 | PR #1 merged — class-aware Singleton snippet + 8 Unity snippets |
 | 12 | 12.0.0 | two-lane brain, worker crash recovery, the autocomplete range-bug root fix, bridge replay + heartbeat |
-| **13** | **13.0.0** | **call flow = only your custom methods (+ hidden-call chip), cross-file terminals, per-caller 1·2·3 call-order badges, self-sizing boxes, copyable graph errors + render-crash containment** |
+| 13 | 13.0.0 | call flow = only your custom methods (+ hidden-call chip), cross-file terminals, per-caller 1·2·3 call-order badges, self-sizing boxes, copyable graph errors + render-crash containment |
+| **14** | **14.0.0** | **real find-in-files (Ctrl+Shift+F: live search, case/whole-word/regex, match highlighting, honest “not scanned yet → scan & re-run” coverage) + MCP server so AI agents can pull problems / structure / code search / file contents from the running editor** |
 
 Full details in [VERSIONS.md](VERSIONS.md).
 

@@ -25,7 +25,9 @@ export function dedupeProblems(items: ProblemItem[]): ProblemItem[] {
   return out;
 }
 
-/** clipboard text for one row (matches the Problems-bar Ctrl+C contract) */
+/** clipboard text for one row (matches the Problems-bar Ctrl+C contract).
+ *  Phase 14 — includes the compiler-style code when the engine knows it. */
 export function problemToText(p: ProblemItem): string {
-  return `${p.path}(${p.line + 1},${p.col + 1}): ${p.severity.toUpperCase()} — ${p.message}`;
+  const code = (p as { code?: string }).code ? ` ${(p as { code?: string }).code}` : "";
+  return `${p.path}(${p.line + 1},${p.col + 1}): ${p.severity.toUpperCase()}${code} — ${p.message}`;
 }

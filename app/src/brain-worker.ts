@@ -94,6 +94,8 @@ const handlers: Record<string, (p: any) => any> = {
   documentSymbols: (p) => engine!.outline(p.path),
   workspaceSymbols: (p) => engine!.workspaceSymbols(p.q ?? ""),
   search: (p) => engine!.search(p.q ?? "", p.opts ?? {}),
+  // Phase 14 — find-in-files with options + coverage (unsearched cache-warm files)
+  searchProject: (p) => engine!.searchProject(p.q ?? "", p.opts ?? {}),
   semanticTokens: (p) => engine!.semanticTokens(p.path, p.content),
   semantic: (p) => engine!.semantic(p.path, p.content),
 

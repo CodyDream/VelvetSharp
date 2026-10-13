@@ -98,6 +98,19 @@ function rawToken(): string {
   } catch { return String((window as any).NL_TOKEN || ""); }
 }
 
+/** Phase 14 — the FULL shared auth token for this editor session.
+ *  The MCP discovery file shares it so mcp/server.mjs can open its own WS:
+ *  /__neutralino_globals.js is one-shot (the FIRST fetch gets the token, every
+ *  later fetch returns ''), so a second local client cannot self-fetch one.
+ *  Wire contract (verified against the real Neutralino 6.10 server): the WS
+ *  url wants token.split(".")[1] (the payload segment) as ?connectToken=,
+ *  while every native call carries the FULL token as accessToken. The same
+ *  token stays valid for the session — that is how this module's own
+ *  self-healing reconnect works. Localhost-only by construction. */
+export function getConnectToken(): string {
+  return rawToken();
+}
+
 /** after NE_RT_INVTOKN: the server can hand out a fresh one-shot token */
 async function refreshTokenFromServer(): Promise<boolean> {
   try {

@@ -4,7 +4,7 @@ import { monaco, CSHARP_LANG, defineAllThemes, applyTheme, getSavedThemeId, DEFA
 import { THEMES, themeById, saveTheme } from "./themes";
 import { getAdapter, browserAdapter, initPlatform, isDesktop, baseName, getRecents } from "./adapters";
 import { useStore } from "./store";
-import { BrainClient, type UpdateFileResult, type SemanticReport, type RenamePlanResult } from "./brain-client";
+import { BrainClient, type UpdateFileResult, type SemanticReport, type RenamePlanResult, type ProjectSearchResult } from "./brain-client";
 import { DepGraphView } from "./depgraph";
 import { parseCsproj } from "@brain/csproj";
 import { parseAsmdef, guidFromMeta } from "@brain/asmdef";
@@ -13,8 +13,9 @@ import { readCache, writeCache, statFiles, fingerprintChanged, cacheEnabled, CAC
 import { UNITY_LIFECYCLE, UNITY_MESSAGE_NAMES } from "@brain/snippets";
 import { detectEol, convertEol, eolOfMonaco, splitLines, joinLines, type Eol } from "./eol";
 import { dedupeProblems, problemToText } from "./problems";
-import { hydrateConfigFromDisk, configFilePath, saveConfigField } from "./configStore";
+import { hydrateConfigFromDisk, configFilePath, mcpDiscoveryPath, saveConfigField } from "./configStore";
 import { getBridgeState, subscribeBridge, bridgeStats, bridgeSelfTest, forceReconnect, type BridgeState } from "./nl-bridge";
+import { startMcpServer, refreshMcpDiscovery } from "./mcp-server";
 import { APP_LABEL, APP_BUILD, APP_PHASE } from "./version"; // Phase numbering system (user request)
 import fuzzysort from "fuzzysort";
 import "./index.css";
@@ -60,6 +61,10 @@ export async function boot() {
 
     // workspace: scan → csproj auto-config → index → open first script
     await loadWorkspace(client);
+
+    // Phase 14 — MCP: let AI agents ask the running editor for problems,
+    // project structure, code search and file contents (desktop only)
+    startMcpServer();
 
     // v0.7.0 — one RPC per keystroke: updateFile(deep) parses once and returns
     // syntax + semantic together (the old flow made two worker round-trips and
@@ -351,6 +356,8 @@ async function reloadWorkspace() {
   monaco.editor.getModels().forEach((m: any) => m.dispose());
   try {
     await loadWorkspace(client);
+    // Phase 14 — the workspace root changed; re-publish MCP discovery
+    void refreshMcpDiscovery();
   } catch (e: any) {
     st.setStatus("workspace reload failed: " + String(e?.message ?? e));
   }
@@ -407,10 +414,10 @@ function recomputeProblems() {
   const paths = new Set<string>([...syntaxByPath.keys(), ...semanticByPath.keys()]);
   for (const p of paths) {
     for (const d of syntaxByPath.get(p) ?? []) {
-      items.push({ path: p, line: d.line, col: d.col, length: d.length, message: d.message, severity: d.severity as any, source: d.source, fix: d.fix as any });
+      items.push({ path: p, line: d.line, col: d.col, length: d.length, message: d.message, severity: d.severity as any, source: d.source, fix: d.fix as any, code: (d as any).code });
     }
     for (const d of semanticByPath.get(p)?.diagnostics ?? []) {
-      items.push({ path: p, line: d.line, col: d.col, length: d.length, message: d.message, severity: d.severity as any, source: d.source, fix: d.fix as any });
+      items.push({ path: p, line: d.line, col: d.col, length: d.length, message: d.message, severity: d.severity as any, source: d.source, fix: d.fix as any, code: (d as any).code });
     }
   }
   st.setProblems(dedupeProblems(items));
@@ -2365,7 +2372,8 @@ function Palette() {
     { label: "Navigate: Go Back (Alt+Left)", run: () => navGo(-1) },
     { label: "Navigate: Go Forward (Alt+Right)", run: () => navGo(1) },
     { label: "View: Toggle Explorer", run: () => useStore.getState().setSidebarView("explorer") },
-    { label: "View: Toggle Search Panel", run: () => useStore.getState().setSidebarView("search") },
+    { label: "Search: Find in Project Files (Ctrl+Shift+F)", run: () => useStore.getState().setSidebarView("search") },
+    { label: "AI: MCP Connection Info (for external agents)", run: () => useStore.getState().setSettingsOpen(true) },
     { label: "View: Toggle Outline", run: () => useStore.getState().setSidebarView("outline") },
     { label: "View: Toggle .meta visibility", run: () => useStore.getState().toggleHideMeta() },
     { label: "File: Close All Tabs", run: () => { const st = useStore.getState(); st.tabs.forEach((t) => st.closeTab(t.path)); } },
@@ -2533,50 +2541,178 @@ function navGo(dir: -1 | 1): void {
   }
 }
 
-/* ------------------------------ search ------------------------------ */
+/* --------------------------- search (Phase 14) ---------------------------
+ *  Find-in-files got real: live debounced search, case / whole-word / regex
+ *  options, match highlighting with line context, per-file grouping with
+ *  counts — and an honest coverage report: files indexed from the startup
+ *  cache have no text in the engine yet, so the panel offers "scan & re-run"
+ *  instead of silently missing them (the old behavior). The MCP search_code
+ *  tool shares the exact same engine call. */
+
+const SEARCH_DEBOUNCE_MS = 250;
+const HITS_PER_FILE = 20;
+
+/** slice a source line around the match and mark the match itself */
+function HitLine({ hit }: { hit: { text: string; col: number; length: number } }) {
+  const start = Math.max(0, hit.col - 42);
+  const end = Math.min(hit.text.length, hit.col + hit.length + 70);
+  const pre = (start > 0 ? "…" : "") + hit.text.slice(start, hit.col);
+  const match = hit.text.slice(hit.col, hit.col + hit.length);
+  const post = hit.text.slice(hit.col + hit.length, end) + (end < hit.text.length ? "…" : "");
+  return (
+    <code>
+      {pre}
+      <mark>{match || " "}</mark>
+      {post}
+    </code>
+  );
+}
 
 function SearchPanel({ inline }: { inline?: boolean }) {
   const [q, setQ] = useState("");
+  const [caseSensitive, setCaseSensitive] = useState(false);
+  const [wholeWord, setWholeWord] = useState(false);
   const [regex, setRegex] = useState(false);
-  const [hits, setHits] = useState<any[]>([]);
+  const [res, setRes] = useState<ProjectSearchResult | null>(null);
   const [searched, setSearched] = useState(false);
+  const [scanning, setScanning] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const runIdRef = useRef(0);
 
-  const run = () => {
-    if (!q) { setHits([]); return; }
-    const client = (window as any).__client as BrainClient | undefined;
+  const client = (window as any).__client as BrainClient | undefined;
+  const adapter = getAdapter();
+
+  const run = (immediate = false) => {
+    if (!q) { setRes(null); setSearched(false); return; }
     if (!client) return;
-    client.search(q, { regex, max: 300 })
-      .then((res) => { setHits(res); setSearched(true); })
-      .catch(() => {});
+    if (!immediate && debounceRef.current) clearTimeout(debounceRef.current);
+    const id = ++runIdRef.current;
+    const t0 = performance.now();
+    const opts = { regex, caseSensitive, wholeWord, max: 600 };
+    const go = () => {
+      client.searchProject(q, opts)
+        .then((r) => { if (id === runIdRef.current) { setRes(r); setSearched(true); setElapsed(Math.round(performance.now() - t0)); } })
+        .catch(() => { /* stale worker — the next keystroke retries */ });
+    };
+    if (immediate) go();
+    else debounceRef.current = setTimeout(go, SEARCH_DEBOUNCE_MS);
   };
+
+  // live search: re-run whenever the query or an option changes
+  useEffect(() => {
+    if (!q) { setRes(null); setSearched(false); return; }
+    run();
+    return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
+  }, [q, caseSensitive, wholeWord, regex]);
+
+  // focus + preselect when the panel opens (Ctrl+Shift+F)
+  useEffect(() => {
+    const el = inputRef.current;
+    if (el) { el.focus(); el.select(); }
+  }, []);
+
+  /** Phase 14 coverage fix: read the cache-only files the engine has no text
+   *  for, feed them to the worker (light index), then re-run the search. */
+  const scanMissing = async () => {
+    const missing = res?.unsearched ?? [];
+    if (!missing.length || scanning || !client) return;
+    setScanning(true);
+    try {
+      const CHUNK = 10;
+      for (let i = 0; i < missing.length; i += CHUNK) {
+        const chunk = missing.slice(i, i + CHUNK);
+        const reads = await Promise.allSettled(chunk.map((p) => adapter.read(p)));
+        for (let j = 0; j < chunk.length; j++) {
+          const r = reads[j];
+          if (r.status !== "fulfilled") continue; // unreadable — the engine stays without it
+          try { await client.updateFile(chunk[j], r.value); } catch { /* worker hiccup — keep going */ }
+        }
+      }
+      run(true);
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  const onInputKey = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      run(true);
+      const first = res?.hits?.[0];
+      if (first) openAt(first.file, first.line, first.col);
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      if (q) { setQ(""); setRes(null); setSearched(false); }
+      else if (!inline) useStore.getState().setSidebarView("explorer");
+    }
+  };
+
+  const hits = res?.hits ?? [];
+  const fileCount = new Set(hits.map((h) => h.file)).size;
+  const optBtn = (on: boolean, set: (v: boolean) => void, label: string, title: string) => (
+    <button
+      className={"opt" + (on ? " on" : "")}
+      title={title}
+      onClick={() => set(!on)}
+    >{label}</button>
+  );
 
   return (
     <div className={"search" + (inline ? "" : " floating")} onClick={(e) => e.stopPropagation()}>
       <div className="search-row">
         <input
+          ref={inputRef}
           autoFocus
           value={q}
-          placeholder="Search in project…"
+          placeholder="Search across all project scripts…  (Enter = jump to first match)"
           onChange={(e) => setQ(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter") run(); if (e.key === "Escape" && !inline) useStore.getState().setSidebarView("explorer"); }}
+          onKeyDown={onInputKey}
         />
-        <label className="chk"><input type="checkbox" checked={regex} onChange={(e) => setRegex(e.target.checked)} /> .*</label>
-        <button onClick={run}>Find</button>
+        <button onClick={() => run(true)} title="search now">Find</button>
         {!inline && <button className="close" onClick={() => useStore.getState().setSidebarView("explorer")}>×</button>}
       </div>
+      <div className="search-opts">
+        {optBtn(caseSensitive, setCaseSensitive, "Aa", "case sensitive")}
+        {optBtn(wholeWord, setWholeWord, "|w|", "whole word — matches the full identifier only")}
+        {optBtn(regex, setRegex, ".*", "regular expression")}
+        <span className="search-opts-hint">Esc clears · Enter jumps to the first match</span>
+      </div>
       <div className="search-results">
-        {searched && <div className="search-count">{hits.length} results</div>}
+        {searched && res && (
+          <div className="search-meta">
+            <span className="search-count">
+              {res.error ? res.error : `${hits.length} match${hits.length === 1 ? "" : "es"} in ${fileCount} file${fileCount === 1 ? "" : "s"} · ${elapsed} ms`}
+              {res.truncated ? " — capped, refine the query" : ""}
+            </span>
+            {res.unsearched.length > 0 && (
+              <button className="scan-btn" onClick={scanMissing} disabled={scanning} title="these files are indexed from the startup cache and have no text in the engine yet — read them now and search again">
+                {scanning ? "scanning…" : `+ ${res.unsearched.length} file${res.unsearched.length === 1 ? "" : "s"} not scanned yet — scan & re-run`}
+              </button>
+            )}
+          </div>
+        )}
         {groupBy(hits).map(([file, list]) => (
-          <div key={file}>
-            <div className="search-file">{file} <span className="cnt">{list.length}</span></div>
-            {list.slice(0, 12).map((h: any, i: number) => (
+          <div key={file} className="search-filegroup">
+            <div className="search-file" onClick={() => openAt(file, list[0].line, list[0].col)}>
+              {file} <span className="cnt">{list.length}</span>
+            </div>
+            {list.slice(0, HITS_PER_FILE).map((h: any, i: number) => (
               <div key={i} className="search-hit" onClick={() => openAt(h.file, h.line, h.col)}>
                 <span className="ln">{h.line + 1}</span>
-                <code>{h.text.trim().slice(0, 90)}</code>
+                <HitLine hit={h} />
               </div>
             ))}
+            {list.length > HITS_PER_FILE && (
+              <div className="search-more">+ {list.length - HITS_PER_FILE} more in this file</div>
+            )}
           </div>
         ))}
+        {searched && !res?.error && hits.length === 0 && (
+          <div className="search-empty">no matches{res && res.unsearched.length ? " in the scanned files — the scan-more button above covers the rest" : ""}</div>
+        )}
       </div>
     </div>
   );
@@ -2675,9 +2811,13 @@ function SettingsModal() {
   const fontSize = useStore((s) => s.fontSize);
   const [cfgPath, setCfgPath] = useState("");
   const [selfTest, setSelfTest] = useState<string>("");
+  const [mcpPath, setMcpPath] = useState("");
+  const [mcpTools, setMcpTools] = useState<string[]>([]);
   useEffect(() => {
     if (!open) { setSelfTest(""); return; }
     configFilePath().then(setCfgPath).catch(() => setCfgPath(""));
+    mcpDiscoveryPath().then(setMcpPath).catch(() => setMcpPath(""));
+    try { setMcpTools((window as any).__vsMcp?.status()?.tools ?? []); } catch { setMcpTools([]); }
   }, [open]);
   if (!open) return null;
   const isDesk = typeof window !== "undefined" && "NL_PORT" in window;
@@ -2730,6 +2870,16 @@ function SettingsModal() {
                 setSelfTest(r.detail);
               }}>run self-test</button>
               <button className="btn" onClick={() => forceReconnect()}>reconnect</button>
+            </span>
+          </Row>
+        )}
+        {isDesk && (
+          <Row label="AI agents (MCP)" hint={`external AI assistants connect through mcp/server.mjs and can query this live editor — tools: ${mcpTools.join(", ") || "booting…"}. Point the agent's config at the VelvetSharp folder's mcp/server.mjs (needs Node.js 18+).`}>
+            <span className="settings-inline">
+              <span className={"bridge-state " + (mcpTools.length ? "ok" : "warn")}>
+                ● {mcpTools.length ? "listening" : "booting"}
+              </span>
+              <code className="settings-path">{mcpPath || "(discovery file unavailable)"}</code>
             </span>
           </Row>
         )}

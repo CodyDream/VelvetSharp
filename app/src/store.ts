@@ -35,6 +35,9 @@ export interface ProblemItem {
   severity: "error" | "warning" | "info";
   source: string;
   fix?: { kind: "addUsing"; ns: string; title: string; line: number; col: number; text: string };
+  /** Phase 14 — compiler-style code (CS0219, CS0168, CS0618 …) surfaced to the
+   *  Problems bar copy + the MCP get_problems tool */
+  code?: string;
 }
 
 interface VSState {

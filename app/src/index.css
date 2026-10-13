@@ -215,6 +215,31 @@ body {
 .search-hit:hover { background: var(--bg-raised); color: var(--text); }
 .search-hit .ln { color: var(--accent2); min-width: 28px; text-align: right; }
 .search-hit code { font-family: Consolas, monospace; font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Phase 14 — find-in-files options row, highlighted matches, coverage row */
+.search-opts { display: flex; gap: 6px; padding: 6px 10px; align-items: center; border-bottom: 1px solid var(--border); }
+.search-opts .opt {
+  border: 1px solid var(--border); background: transparent; color: var(--muted);
+  font-size: 10.5px; font-family: Consolas, monospace; border-radius: 4px;
+  padding: 2px 7px; cursor: pointer; line-height: 1.4;
+}
+.search-opts .opt:hover { color: var(--text); border-color: var(--accent); }
+.search-opts .opt.on { color: var(--bg); background: var(--accent); border-color: var(--accent); font-weight: 700; }
+.search-opts-hint { color: var(--muted); font-size: 10px; margin-left: auto; white-space: nowrap; }
+.search-meta { display: flex; flex-direction: column; gap: 4px; padding: 4px 12px 2px; }
+.search-meta .search-count { padding: 0; }
+.scan-btn {
+  border: 1px dashed var(--warn); background: transparent; color: var(--warn);
+  font-size: 10.5px; border-radius: 4px; padding: 3px 8px; cursor: pointer;
+  text-align: left; width: fit-content;
+}
+.scan-btn:hover { background: var(--bg-raised); }
+.scan-btn:disabled { opacity: 0.6; cursor: default; }
+.search-hit mark { background: transparent; color: var(--accent); font-weight: 700; text-decoration: underline; }
+.search-filegroup { border-bottom: 1px solid var(--border); padding-bottom: 2px; margin-bottom: 2px; }
+.search-file { cursor: pointer; }
+.search-file:hover { color: var(--text); }
+.search-more { padding: 2px 12px 4px 40px; color: var(--muted); font-size: 10.5px; font-style: italic; }
+.search-empty { padding: 10px 12px; color: var(--muted); font-size: 11.5px; }
 
 /* outline panel */
 .outline { flex: 1; overflow: auto; padding-bottom: 12px; }

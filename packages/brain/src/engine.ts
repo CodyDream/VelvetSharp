@@ -1340,17 +1340,43 @@ export class VelvetSharpEngine {
   }
 
   search(query: string, opts: { regex?: boolean; caseSensitive?: boolean; max?: number } = {}): SearchHit[] {
-    const max = opts.max ?? 500;
+    return this.searchProject(query, opts).hits;
+  }
+
+  /** Phase 14 — project-wide find-in-files with real options + coverage report.
+   *  The old search() silently skipped every cache-warm file (loadCachedSymbols
+   *  stores content:"" until the file is first opened/swept), so results right
+   *  after a warm boot were silently incomplete. searchProject() reports those
+   *  files as `unsearched` so the UI (and the MCP search_code tool) can surface
+   *  — and fix — the gap instead of hiding it. */
+  searchProject(
+    query: string,
+    opts: { regex?: boolean; caseSensitive?: boolean; wholeWord?: boolean; max?: number } = {},
+  ): ProjectSearchResult {
+    const max = Math.max(1, opts.max ?? 500);
     const hits: SearchHit[] = [];
+    const searched: string[] = [];
+    const unsearched: string[] = [];
+    if (!query) return { hits, searched: [], unsearched: [...this.files.keys()], truncated: false, max };
+    const flags = opts.caseSensitive ? "g" : "gi";
     let re: RegExp | null = null;
-    if (opts.regex) {
-      try { re = new RegExp(query, opts.caseSensitive ? "g" : "gi"); } catch { return []; }
+    if (opts.regex || opts.wholeWord) {
+      // wholeWord wraps the ESCAPED literal in \b anchors; regex passes through
+      const src = opts.regex ? query : query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const wrapped = opts.wholeWord ? `\\b(?:${src})\\b` : src;
+      try { re = new RegExp(wrapped, flags); } catch { return { hits, searched, unsearched, truncated: false, max, error: "invalid regular expression" }; }
     }
+    const needle = opts.caseSensitive ? query : query.toLowerCase();
     for (const [path, st] of this.files) {
+      if (hits.length >= max) { unsearched.push(path); continue; }
+      // a cache-warm file has neither content nor a parse tree — it simply
+      // cannot be searched yet (the caller decides whether to fetch it)
+      if (!st.content && !st.tree) { unsearched.push(path); continue; }
+      searched.push(path);
       const lines = st.content.split("\n");
       for (let i = 0; i < lines.length && hits.length < max; i++) {
         const line = lines[i];
-        if (opts.regex && re) {
+        if (re) {
           re.lastIndex = 0;
           let m: RegExpExecArray | null;
           while ((m = re.exec(line)) && hits.length < max) {
@@ -1359,14 +1385,15 @@ export class VelvetSharpEngine {
           }
         } else {
           const hay = opts.caseSensitive ? line : line.toLowerCase();
-          const needle = opts.caseSensitive ? query : query.toLowerCase();
-          const idx = hay.indexOf(needle);
-          if (idx >= 0) hits.push({ file: path, line: i, col: idx, length: query.length, text: line });
+          let idx = hay.indexOf(needle);
+          while (idx >= 0 && hits.length < max) {
+            hits.push({ file: path, line: i, col: idx, length: query.length, text: line });
+            idx = hay.indexOf(needle, idx + Math.max(1, needle.length));
+          }
         }
       }
-      if (hits.length >= max) break;
     }
-    return hits;
+    return { hits, searched, unsearched, truncated: hits.length >= max, max };
   }
 
   /* --------------------------- semantic analysis --------------------------- */

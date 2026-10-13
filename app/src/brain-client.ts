@@ -50,7 +50,7 @@ const LANE_TIMEOUT_RESPAWN = 2;
 /** methods that MUST run on the interactive lane */
 const FAST_METHODS = new Set([
   "completions", "hover", "signatureHelp", "definitions",
-  "outline", "documentSymbols", "workspaceSymbols", "search",
+  "outline", "documentSymbols", "workspaceSymbols", "search", "searchProject",
 ]);
 /** state-changing calls that BOTH lanes must see (engine state mirroring) */
 const MIRROR_METHODS = new Set([
@@ -275,6 +275,10 @@ export class BrainClient {
   outline(path: string) { return this.call<any[]>("outline", { path }); }
   workspaceSymbols(q: string) { return this.call<any[]>("workspaceSymbols", { q }); }
   search(q: string, opts: any = {}) { return this.call<any[]>("search", { q, opts }); }
+  /** Phase 14 — find-in-files with options + coverage report (unsearched files) */
+  searchProject(q: string, opts: { regex?: boolean; caseSensitive?: boolean; wholeWord?: boolean; max?: number } = {}) {
+    return this.call<ProjectSearchResult>("searchProject", { q, opts });
+  }
   semanticTokens(path: string, content: string) { return this.call<Uint32Array>("semanticTokens", { path, content }); }
   semantic(path: string, content?: string) { return this.call<SemanticReport>("semantic", { path, content }); }
 
@@ -402,6 +406,16 @@ export interface CallFlowResult {
 }
 
 export interface SemRange { line: number; col: number; endLine: number; endCol: number }
+/** Phase 14 — find-in-files result: hits + which files could not be searched
+ *  yet (indexed from the startup cache without text; scan them to complete) */
+export interface ProjectSearchResult {
+  hits: { file: string; line: number; col: number; length: number; text: string }[];
+  searched: string[];
+  unsearched: string[];
+  truncated: boolean;
+  max: number;
+  error?: string;
+}
 export interface SemanticReport {
   diagnostics: { line: number; col: number; length: number; message: string; severity: string; source: string; fix?: QuickFixDto }[];
   unreachable: SemRange[];

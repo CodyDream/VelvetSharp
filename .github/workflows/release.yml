@@ -83,12 +83,15 @@ jobs:
       - name: Assemble portable zip
         run: |
           TAG="${{ steps.ver.outputs.tag }}"
-          mkdir -p out
+          mkdir -p out/mcp
           cp desktop/dist/VelvetSharp/VelvetSharp-win_x64.exe out/VelvetSharp.exe
           cp desktop/dist/VelvetSharp/resources.neu out/resources.neu
           cp README-FIRST.txt out/README-FIRST.txt
+          # Phase 14 — MCP server so AI agents can talk to the running editor
+          cp mcp/server.mjs out/mcp/server.mjs
+          cp mcp/README.md out/mcp/README.md
           cd out
-          zip -9 "VelvetSharp-$TAG-win-x64-portable.zip" VelvetSharp.exe resources.neu README-FIRST.txt
+          zip -9 "VelvetSharp-$TAG-win-x64-portable.zip" VelvetSharp.exe resources.neu README-FIRST.txt mcp/server.mjs mcp/README.md
           sha256sum "VelvetSharp-$TAG-win-x64-portable.zip" > "VelvetSharp-$TAG-win-x64-portable.zip.sha256"
           ls -la
 

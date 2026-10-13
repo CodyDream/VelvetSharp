@@ -1579,6 +1579,130 @@ public class Battle13 : MonoBehaviour
     if (failed13.length) process.exitCode = 2;
   }
 
+  // ---- TEST59: Phase 14 — find-in-files options + coverage, MCP payload
+  // formatters (pure) ----
+  {
+    const results14: [string, boolean][] = [];
+    const check14 = (name: string, ok: boolean) => {
+      results14.push([name, !!ok]);
+      console.log(`  ${ok ? "PASS" : "FAIL"} — ${name}`);
+    };
+    // pure MCP payload formatters — same module the page-side dispatcher uses
+    const { formatProblems, buildStructure, formatSearch, formatFileContent } = await import("../app/src/mcp-tools");
+
+    // controlled fixture FIRST — every search assertion below keys off it
+    engine.updateFile("__test59__/Words.cs", `public class Words14
+{
+    void Awake() { }
+    string up = "up";
+    string upgrade = "upgrade";
+    string update = "update";
+    string group = "group";
+    // up again
+}`, true);
+
+    // -- (a) searchProject basics on a controlled fixture --
+    const legacy = engine.search("words14");
+    const modern = engine.searchProject("words14");
+    check14("TEST59a search() stays compatible with searchProject().hits",
+      legacy.length === modern.hits.length && modern.hits.length > 0
+      && typeof modern.hits[0].file === "string" && typeof modern.hits[0].line === "number");
+
+    // -- (b) whole word vs substring (fixture already loaded above) --
+    const plainUp = engine.searchProject("up").hits.filter((h) => h.file === "__test59__/Words.cs");
+    const wholeUp = engine.searchProject("up", { wholeWord: true }).hits.filter((h) => h.file === "__test59__/Words.cs");
+    check14("TEST59b whole-word matches only standalone 'up' (3) vs substrings (8+)",
+      wholeUp.length === 3 && plainUp.length >= 8);
+
+    // -- (c) case sensitivity --
+    const ci = engine.searchProject("words14").hits.length;
+    const cs = engine.searchProject("words14", { caseSensitive: true }).hits.length;
+    check14("TEST59c case-insensitive finds what case-sensitive misses",
+      ci > 0 && cs === 0);
+
+    // -- (d) regex mode --
+    const reHits = engine.searchProject(`void\\s+Awake\\s*\\(`, { regex: true });
+    check14("TEST59d regex query locates Awake signatures in the demo project",
+      reHits.hits.length > 0 && /\bvoid\s+Awake\s*\(/.test(reHits.hits[0].text));
+
+    // -- (e) coverage: cache-indexed files (no content) are REPORTED, not missed --
+    engine.loadCachedSymbols([{
+      path: "__test59__/Cached.cs",
+      symbols: { path: "__test59__/Cached.cs", usings: [], namespaces: [], types: [], members: [], typeRefs: [] },
+    }]);
+    const withCached = engine.searchProject("anything");
+    check14("TEST59e cache-warm file (no text yet) lands in unsearched, not searched",
+      withCached.unsearched.includes("__test59__/Cached.cs") && !withCached.searched.includes("__test59__/Cached.cs"));
+    engine.updateFile("__test59__/Cached.cs", "class Cached14 { }", true);
+    const afterScan = engine.searchProject("Cached14");
+    check14("TEST59f after a real update the file is searched and found",
+      afterScan.unsearched.length < withCached.unsearched.length
+      && afterScan.hits.some((h) => h.file === "__test59__/Cached.cs"));
+
+    // -- (g) invalid regex is a clean error, never a throw --
+    const bad = engine.searchProject("([unclosed", { regex: true });
+    check14("TEST59g invalid regex → error field, zero hits, no exception",
+      !!bad.error && bad.hits.length === 0);
+
+    // -- (h) max cap is honest (truncated flag + remaining files listed) --
+    const capped = engine.searchProject("e", { max: 3 });
+    check14("TEST59h result cap sets truncated and reports unsearched remainder",
+      capped.hits.length === 3 && capped.truncated === true && capped.unsearched.length > 0);
+
+    // -- (i) MCP payload: formatProblems --
+    const probs = formatProblems([
+      { path: "Assets\\B.cs", line: 4, col: 0, length: 1, message: "b problem", severity: "warning", source: "vs" },
+      { path: "Assets/A.cs", line: 9, col: 2, length: 3, message: "missing ;", severity: "error", source: "vs", code: "CS1002" },
+      { path: "Assets/C.cs", line: 0, col: 0, length: 1, message: "info row", severity: "info", source: "vs" },
+    ] as any, {});
+    check14("TEST59i problems payload: 1-based coords, compiler-style row with code",
+      probs.summary.errors === 1 && probs.summary.warnings === 1 && probs.summary.infos === 1
+      && probs.problems[0].file === "Assets/A.cs" && probs.problems[0].line === 10 && probs.problems[0].col === 3
+      && probs.problems[0].code === "CS1002"
+      && /^Assets\/A\.cs\(10,3\): ERROR CS1002: missing ;$/.test(probs.text.split("\n")[1]));
+    const errsOnly = formatProblems([
+      { path: "A.cs", line: 0, col: 0, length: 1, message: "x", severity: "error", source: "vs" },
+      { path: "B.cs", line: 0, col: 0, length: 1, message: "y", severity: "warning", source: "vs" },
+    ] as any, { severity: "error" });
+    check14("TEST59j severity filter narrows get_problems output",
+      errsOnly.problems.length === 1 && errsOnly.problems[0].severity === "error");
+
+    // -- (k) MCP payload: buildStructure (dirs first, scoped, counted) --
+    const tree = buildStructure([
+      "Assets/Scripts/Player.cs", "Assets/Scripts/AI/Turret.cs", "Assets/Scenes/Main.unity", "README.md",
+    ], {});
+    check14("TEST59k structure tree orders dirs before files with counts",
+      tree.fileCount === 4 && tree.dirCount === 4
+      && tree.text.indexOf("AI/") < tree.text.indexOf("Player.cs")
+      && tree.text.indexOf("Scenes/") < tree.text.indexOf("Scripts/"));
+    const scoped = buildStructure([
+      "Assets/Scripts/Player.cs", "Assets/Scripts/AI/Turret.cs", "Docs/x.md",
+    ], { folder: "Assets/Scripts" });
+    check14("TEST59l folder-scoped tree excludes the rest of the workspace",
+      scoped.fileCount === 2 && !scoped.text.includes("Docs"));
+
+    // -- (l) MCP payload: formatSearch + formatFileContent --
+    const sfmt = formatSearch([
+      { file: "A.cs", line: 3, col: 5, length: 2, text: "  Vector3.up;" },
+      { file: "A.cs", line: 7, col: 0, length: 2, text: "up++;" },
+      { file: "B.cs", line: 1, col: 1, length: 2, text: "up" },
+    ], { query: "up", unsearched: ["C.cs"] });
+    check14("TEST59m search payload groups by file, 1-based positions, notes unsearched",
+      sfmt.matchCount === 3 && sfmt.fileCount === 2
+      && /A\.cs \(2\)/.test(sfmt.text) && / {2}4:6: Vector3\.up;/.test(sfmt.text)
+      && sfmt.text.includes("note: 1 file(s) could not be searched yet"));
+    const ffmt = formatFileContent("Assets/A.cs", "l1\nl2\nl3\nl4", { fromLine: 2, toLine: 3 });
+    check14("TEST59n file payload renders a 1-based line window with a header",
+      ffmt.totalLines === 4 && ffmt.from === 2 && ffmt.to === 3
+      && ffmt.text.includes("Assets/A.cs — 4 lines (showing lines 2-3 of 4)")
+      && /\n {2,}2 \| l2\n {2,}3 \| l3$/.test(ffmt.text));
+
+    const failed14 = results14.filter(([, ok]) => !ok);
+    console.log(`\n=========== Phase 14 RESULT: ${results14.length - failed14.length}/${results14.length} PASS ===========`);
+    for (const [name] of failed14) console.log("  FAILED:", name);
+    if (failed14.length) process.exitCode = 2;
+  }
+
   // ---- Phase 9 summary ----
   const failed8 = results8.filter(([, ok]) => !ok);
   console.log(`\n=========== Phase 8 RESULT: ${results8.length - failed8.length}/${results8.length} PASS ===========`);

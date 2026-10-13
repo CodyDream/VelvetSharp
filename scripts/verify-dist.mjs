@@ -68,8 +68,12 @@ check("config hydration at boot", /hydrateConfigFromDisk/.test(js));
 check("no fragile stock client import", !/@neutralinojs\/lib/.test(js));
 
 // 4c. version system present (bumped every phase — see VERSIONS.md checklist)
-check("version chip (status bar)", /version-chip/.test(js) && js.includes("Phase 13"));
-check("Settings version row (build 13.0.0)", js.includes("13.0.0") && /settings-path/.test(js));
+// version identity — parsed from version.ts so it can never drift from the source of truth
+const VER_SRC = fs.readFileSync(path.join(ROOT, "app/src/version.ts"), "utf8");
+const VER_BUILD = /APP_BUILD\s*=\s*"([^"]+)"/.exec(VER_SRC)?.[1] ?? "";
+const VER_PHASE = /APP_PHASE\s*=\s*(\d+)/.exec(VER_SRC)?.[1] ?? "";
+check("version chip (status bar)", /version-chip/.test(js) && js.includes(`Phase ${VER_PHASE}`));
+check(`Settings version row (build ${VER_BUILD})`, js.includes(VER_BUILD) && /settings-path/.test(js));
 check("no stale 0.7.1 branding", !js.includes("v0.7.1 —"));
 
 // 4d. Phase 8 features present
@@ -112,7 +116,7 @@ check("Unity project version detection (ProjectVersion.txt)", js.includes("Proje
 check("custom scripting defines detection", js.includes("scriptingDefineSymbols"));
 check("collapse commands in palette", js.includes("View: Collapse by Methods") && js.includes("View: Expand All"));
 check("editor context menu capture wiring", js.includes("setEditorCtxMenu"));
-check("Phase 13 version chip", js.includes("Phase 13") && js.includes("13.0.0"));
+check(`Phase ${VER_PHASE} version chip`, js.includes(`Phase ${VER_PHASE}`) && js.includes(VER_BUILD));
 // 4i. Phase 12 — rock-solid bridge + never-miss completions
 check("two-lane brain (fast + heavy workers)", js.includes("lane crashed: ") && js.includes("simulateCrash") && js.includes("lane is back online"));
 check("lane crash recovery wired (respawn + resync)", js.includes("lane restarted") && js.includes("onRespawn"));
@@ -134,6 +138,21 @@ check("per-caller call-order badges (1·2·3 localized per method)", js.includes
 check("dynamic node width (boxes fit the entire name)", js.includes("another script") && js.includes("data-w"));
 check("copyable graph errors (version + mode + script + stack)", js.includes("⧉ copy error") && js.includes("graph error copied — paste it into your report"));
 check("render-crash containment (error boundary keeps the app alive)", js.includes("hit an internal error while rendering") && js.includes("⟳ retry"));
+
+// 4k. Phase 14 — real find-in-files + MCP for AI agents
+check("find-in-files: options row (case / whole-word / regex)", js.includes("case sensitive") && js.includes("whole word") && js.includes("regular expression"));
+check("find-in-files: live search hint + jump affordance", js.includes("Esc clears · Enter jumps to the first match"));
+check("find-in-files: coverage banner (unsearched cache-warm files)", js.includes("not scanned yet") && js.includes("scanning…"));
+check("find-in-files: match highlighting (<mark> window)", /<mark>/.test(js) || js.includes("mark"));
+check("search palette command upgraded", js.includes("Search: Find in Project Files (Ctrl+Shift+F)"));
+check("MCP: request/response broadcast events wired", js.includes("vsMcpRequest") && js.includes("vsMcpResponse"));
+check("MCP: editor answers over events.broadcast", js.includes("events.broadcast"));
+check("MCP: all five tools registered", js.includes("get_problems") && js.includes("get_project_structure") && js.includes("search_code") && js.includes("get_file") && js.includes("get_workspace_summary"));
+check("MCP: settings row for agent connection info", js.includes("AI agents (MCP)"));
+check("MCP: palette entry", js.includes("AI: MCP Connection Info (for external agents)"));
+check("MCP: stdio server shipped (mcp/server.mjs)", fs.existsSync(path.join(ROOT, "mcp", "server.mjs")) && fs.readFileSync(path.join(ROOT, "mcp", "server.mjs"), "utf8").includes("tools/call"));
+check("MCP: agent setup guide shipped (mcp/README.md)", fs.existsSync(path.join(ROOT, "mcp", "README.md")) && fs.readFileSync(path.join(ROOT, "mcp", "README.md"), "utf8").includes("claude_desktop_config.json"));
+check("MCP: release pipeline packs mcp/ into the portable zip", fs.readFileSync(path.join(ROOT, ".github/workflows/release.yml"), "utf8").includes("mcp/server.mjs"));
 
 // 5. no stale references to removed APIs
 check("no defineVelvetTheme remnant (theme system replaced it)", !js.includes("defineVelvetTheme"));

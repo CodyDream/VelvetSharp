@@ -127,6 +127,18 @@ export interface SearchHit {
   text: string;
 }
 
+/** Phase 14 — find-in-files result with coverage: `unsearched` lists files that
+ *  were indexed from the startup cache and have no text in the engine yet
+ *  (they open/lazily parse later), so callers can scan them and re-search. */
+export interface ProjectSearchResult {
+  hits: SearchHit[];
+  searched: string[];
+  unsearched: string[];
+  truncated: boolean;
+  max: number;
+  error?: string;
+}
+
 export interface AnalysisResult {
   symbols: FileSymbols;
   diagnostics: Diagnostic[];

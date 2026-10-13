@@ -25,13 +25,17 @@
  *  snippets: SingletonPersistent, OnEnableDisable, TryGetComponent,
  *  NullGuard, RequireComponent, EventAction, Cooldown, GizmoSphere) ·
  *  Phase 12 = rock-solid desktop connection + never-miss autocomplete ·
- *  Phase 13 = this build (call flow shows only custom methods — engine/API
- *  calls hidden with a counter chip, cross-file custom-method terminals,
- *  per-caller 1·2·3 call-order badges, boxes sized to fit full names,
- *  copyable graph errors + render-crash containment).
+ *  Phase 13 = call flow shows only custom methods + order badges + copyable
+ *  graph errors · Phase 14 = this build (real find-in-files: live debounced
+ *  Ctrl+Shift+F search with case / whole-word / regex options, match
+ *  highlighting and an honest coverage report that scans cache-warm files
+ *  instead of silently missing them; MCP integration — a zero-dependency
+ *  stdio server (mcp/server.mjs) lets AI agents ask the RUNNING editor for
+ *  problems (incl. compiler-style codes), project structure, code search and
+ *  file contents, discovered via <dataDir>/VelvetSharp/mcp.json).
  *  Every delivery bumps by one.
  */
-export const APP_PHASE = 13;
-export const APP_BUILD = "13.0.0";
+export const APP_PHASE = 14;
+export const APP_BUILD = "14.0.0";
 export const APP_LABEL = `Phase ${APP_PHASE}`;
 export const APP_TITLE = `VelvetSharp — ${APP_LABEL}`;

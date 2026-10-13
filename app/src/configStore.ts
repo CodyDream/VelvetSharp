@@ -130,3 +130,42 @@ export async function configFilePath(): Promise<string> {
   const dir = await resolveDataDir();
   return dir ? `${dir}/config.json` : "";
 }
+
+/* ----------------------- Phase 14 — MCP discovery -----------------------
+ * AI agents talk to the RUNNING editor through mcp/server.mjs, which needs
+ * to find the Neutralino server (the port is random — "port": 0). The editor
+ * publishes its connection info here at boot; the proxy reads the same file. */
+
+export interface McpDiscovery {
+  port: number;
+  pid?: number;
+  phase?: number;
+  root?: string;
+  /** FULL shared auth token (JWT) — the WS url uses its payload segment as
+   *  ?connectToken=, native calls carry it whole as accessToken.
+   *  /__neutralino_globals.js is one-shot, so the MCP proxy cannot fetch its
+   *  own; the editor shares its session token. Localhost-only. */
+  token?: string;
+  at: number;
+}
+
+/** path of the discovery file (same dir as config.json) */
+export async function mcpDiscoveryPath(): Promise<string> {
+  const dir = await resolveDataDir();
+  return dir ? `${dir}/mcp.json` : "";
+}
+
+/** publish {port, pid, root} so the stdio MCP proxy can reach this editor.
+ *  Serialized through writeChain like every other disk write. Fire-and-forget. */
+export function writeMcpDiscovery(info: Omit<McpDiscovery, "at">): void {
+  if (!desktop()) return;
+  writeChain = writeChain.then(async () => {
+    try {
+      const dir = await resolveDataDir();
+      if (!dir) return;
+      const { nlCall } = await bridge();
+      await nlCall("filesystem.createDirectory", { path: dir }, 6000).catch(() => { /* exists */ });
+      await nlCall("filesystem.writeFile", { path: `${dir}/mcp.json`, data: JSON.stringify({ ...info, at: Date.now() }, null, 2) }, 6000);
+    } catch { /* discovery is best-effort; the proxy has --port as a fallback */ }
+  });
+}
