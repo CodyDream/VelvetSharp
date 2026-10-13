@@ -6,7 +6,7 @@ import {
 } from "./parser";
 import { UnityApi, type ResolvedType, type ResolvedMember } from "./unity";
 import { prettyType } from "./pretty";
-import { UNITY_SNIPPETS, CSHARP_SNIPPETS, CSHARP_KEYWORDS, UNITY_LIFECYCLE, UNITY_MESSAGE_NAMES, pickLoopVar, buildLoopSnippet, buildForeachSnippet, type LifecycleDef } from "./snippets";
+import { UNITY_SNIPPETS, CSHARP_SNIPPETS, CSHARP_KEYWORDS, UNITY_LIFECYCLE, UNITY_MESSAGE_NAMES, pickLoopVar, buildLoopSnippet, buildForeachSnippet, buildSingletonSnippet, type LifecycleDef } from "./snippets";
 import { ST, MOD_DECLARATION, MOD_STATIC, TokenSink } from "./semantic";
 import { normalizeRelPath, type CsprojInfo } from "./csproj";
 import {
@@ -750,7 +750,13 @@ export class VelvetSharpEngine {
       if (p && !label.toLowerCase().startsWith(p)) return;
       out.push({ label, kind: "snippet", detail, insert: body, sortText: "4" + label.toLowerCase() });
     };
-    for (const s of UNITY_SNIPPETS) pushSnippet(s.label, s.detail, s.body);
+    for (const s of UNITY_SNIPPETS) {
+      let body = s.body;
+      // singleton snippets are generated for the class the caret is in
+      if (s.label === "Singleton") body = buildSingletonSnippet(curType);
+      else if (s.label === "SingletonPersistent") body = buildSingletonSnippet(curType, { persistent: true });
+      pushSnippet(s.label, s.detail, body);
+    }
     for (const s of CSHARP_SNIPPETS) {
       let body = s.body;
       if (s.label === "for" || s.label === "forr") body = buildLoopSnippet(s.label as "for" | "forr", pickLoopVar(taken, "index"));
