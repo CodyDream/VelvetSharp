@@ -146,19 +146,142 @@ export const UNITY_SNIPPETS: SnippetDef[] = [
   },
   {
     label: "Singleton",
-    detail: "Singleton pattern",
+    detail: "Singleton: static Instance + guarded Awake + OnDestroy cleanup",
+    kind: "snippet",
+    // the engine swaps in the enclosing class name (see buildSingletonSnippet)
+    body: buildSingletonSnippet(null),
+  },
+  {
+    label: "SingletonPersistent",
+    detail: "Singleton that survives scene loads (DontDestroyOnLoad)",
+    kind: "snippet",
+    body: buildSingletonSnippet(null, { persistent: true }),
+  },
+  {
+    label: "OnEnableDisable",
+    detail: "OnEnable / OnDisable event subscribe + unsubscribe pair",
     kind: "snippet",
     body: [
-      "public static ${1:Manager} Instance { get; private set; }",
-      "",
-      "private void Awake()",
+      "private void OnEnable()",
       "{",
-      "    if (Instance != null && Instance != this) { Destroy(gameObject); return; }",
-      "    Instance = this;",
+      "    ${1:Source}.${2:SomeEvent} += ${3:Handler};",
+      "}",
+      "",
+      "private void OnDisable()",
+      "{",
+      "    ${1:Source}.${2:SomeEvent} -= ${3:Handler};",
+      "}",
+    ].join("\n"),
+  },
+  {
+    label: "TryGetComponent",
+    detail: "TryGetComponent with an error log + early return",
+    kind: "snippet",
+    body: [
+      "if (!TryGetComponent(out ${1:Rigidbody} ${2:body}))",
+      "{",
+      "    Debug.LogError($\"{nameof(${1:Rigidbody})} is missing on '{name}'\", this);",
+      "    return;",
+      "}",
+    ].join("\n"),
+  },
+  {
+    label: "NullGuard",
+    detail: "Unassigned-reference guard with error log + early return",
+    kind: "snippet",
+    body: [
+      "if (${1:target} == null)",
+      "{",
+      "    Debug.LogError($\"{nameof(${1:target})} is not assigned on '{name}'\", this);",
+      "    return;",
+      "}",
+    ].join("\n"),
+  },
+  {
+    label: "RequireComponent",
+    detail: "[RequireComponent(typeof(T))] attribute",
+    kind: "snippet",
+    body: "[RequireComponent(typeof(${1:Rigidbody}))]",
+  },
+  {
+    label: "EventAction",
+    detail: "public event Action<T> field",
+    kind: "snippet",
+    body: "public event System.Action<${1:int}> ${2:OnChanged};",
+  },
+  {
+    label: "Cooldown",
+    detail: "Time.time based cooldown (field, IsReady, StartCooldown)",
+    kind: "snippet",
+    body: [
+      "[SerializeField] private float ${1:cooldown} = ${2:1f};",
+      "private float ${3:nextReadyTime};",
+      "",
+      "private bool IsReady => Time.time >= ${3:nextReadyTime};",
+      "",
+      "private void StartCooldown()",
+      "{",
+      "    ${3:nextReadyTime} = Time.time + ${1:cooldown};",
+      "}",
+    ].join("\n"),
+  },
+  {
+    label: "GizmoSphere",
+    detail: "OnDrawGizmosSelected wire sphere",
+    kind: "snippet",
+    body: [
+      "private void OnDrawGizmosSelected()",
+      "{",
+      "    Gizmos.color = ${1:Color.yellow};",
+      "    Gizmos.DrawWireSphere(transform.position, ${2:radius});",
       "}",
     ].join("\n"),
   },
 ];
+
+/** Singleton snippet body.
+ *
+ *  Generates, for the class the caret is in:
+ *   - `public static <Type> Instance { get; private set; }`
+ *   - Awake: if an Instance already exists (and it is not this one) log a warning
+ *     and DO NOT assign; otherwise assign `Instance = this`
+ *   - OnDestroy: only if `Instance == this`, null it — so a rejected duplicate
+ *     being destroyed can never wipe the real instance
+ *
+ *  `typeName` is the enclosing class (plain text). When the caret is not inside
+ *  a class it falls back to an editable `${1:Manager}` placeholder. */
+export function buildSingletonSnippet(typeName: string | null, opts: { persistent?: boolean } = {}): string {
+  const T = typeName ?? "${1:Manager}";
+  // mirror the first placeholder instead of repeating its default text
+  const Tref = typeName ?? "${1}";
+  const lines = [
+    `public static ${T} Instance { get; private set; }`,
+    "",
+    "private void Awake()",
+    "{",
+    "    if (Instance != null && Instance != this)",
+    "    {",
+    `        Debug.LogWarning($"Duplicate {nameof(${Tref})} on '{name}': an instance already exists on '{Instance.name}', not assigning.", this);`,
+    "        return;",
+    "    }",
+    "",
+    "    Instance = this;",
+  ];
+  if (opts.persistent) lines.push("    DontDestroyOnLoad(gameObject);");
+  lines.push(
+    "    ${0}",
+    "}",
+    "",
+    "private void OnDestroy()",
+    "{",
+    "    if (Instance == this)",
+    "    {",
+    "        Instance = null;",
+    "    }",
+    "}",
+  );
+  return lines.join("\n");
+}
 
 export const CSHARP_KEYWORDS = [
   "abstract", "as", "base", "bool", "break", "byte", "case", "catch", "char", "class",

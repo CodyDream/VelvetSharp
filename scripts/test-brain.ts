@@ -1137,6 +1137,103 @@ async function main() {
     if (failed10.length) process.exitCode = 2;
   }
 
+  // ---- Snippets: singleton generator + extra Unity snippets ----
+  // WHAT THIS PROVES: the Singleton snippet is generated for the class the caret
+  // is in and its text follows the spec (guarded Awake that warns instead of
+  // assigning a duplicate; OnDestroy that only clears Instance when it is `this`),
+  // and every Unity snippet expands to C# the engine's own parser accepts.
+  // WHAT IT DOES NOT PROVE: Monaco's tab-stop UX (needs the visual E2E) or that
+  // Unity itself compiles the output (no Unity here) — only parse-cleanliness.
+  {
+    const resultsS: [string, boolean][] = [];
+    const checkS = (name: string, ok: boolean) => {
+      resultsS.push([name, !!ok]);
+      console.log(`  ${ok ? "PASS" : "FAIL"} — ${name}`);
+    };
+    const snipOf = (p: string, line: number, col: number, label: string) =>
+      engine.completions(p, line, col).find((c: any) => c.kind === "snippet" && c.label === label)?.insert ?? "";
+    // resolve snippet syntax the way an editor does when the user just tabs through
+    const expand = (b: string) => b.replace(/\$\{\d+:([^}]*)\}/g, "$1").replace(/\$\{\d+\}/g, "").replace(/\$\d+/g, "");
+
+    // --- member level inside a class → real class name, spec-shaped body
+    engine.updateFile("__snip__/PlayerManager.cs",
+      ["using UnityEngine;", "public class PlayerManager : MonoBehaviour", "{", "    singleton", "}"].join("\n"), true);
+    const sing = snipOf("__snip__/PlayerManager.cs", 3, 13, "Singleton");
+    console.log("SNIP Singleton:\n" + sing);
+    checkS("SNIP-a Singleton is generated for the enclosing class (static PlayerManager Instance)",
+      sing.includes("public static PlayerManager Instance { get; private set; }"));
+    const iDup = sing.indexOf("Instance != null && Instance != this");
+    const iWarn = sing.indexOf("Debug.LogWarning");
+    const iRet = sing.indexOf("return;");
+    const iAssign = sing.indexOf("Instance = this;");
+    checkS("SNIP-b Awake order: duplicate check → warning → return → only then assign (duplicate is never assigned)",
+      iDup > 0 && iWarn > iDup && iRet > iWarn && iAssign > iRet);
+    checkS("SNIP-c duplicate warning names the class and both objects, and passes `this` as the log context",
+      /nameof\(PlayerManager\)/.test(sing) && sing.includes("{name}") && sing.includes("{Instance.name}") && /, this\);/.test(sing));
+    const iDestroy = sing.indexOf("private void OnDestroy()");
+    const iSelfCheck = sing.indexOf("if (Instance == this)", iDestroy);
+    const iNull = sing.indexOf("Instance = null;", iSelfCheck);
+    checkS("SNIP-d OnDestroy clears Instance only inside an `Instance == this` check",
+      iDestroy > iAssign && iSelfCheck > iDestroy && iNull > iSelfCheck);
+    checkS("SNIP-e plain Singleton does NOT call DontDestroyOnLoad", !sing.includes("DontDestroyOnLoad"));
+    const persist = snipOf("__snip__/PlayerManager.cs", 3, 13, "SingletonPersistent");
+    checkS("SNIP-f SingletonPersistent assigns first, then DontDestroyOnLoad, and keeps the same guards",
+      persist.indexOf("DontDestroyOnLoad(gameObject);") > persist.indexOf("Instance = this;") &&
+      persist.includes("Instance == this") && persist.includes("Debug.LogWarning"));
+
+    // --- nested class: the INNERMOST class wins
+    engine.updateFile("__snip__/Nested.cs",
+      ["using UnityEngine;", "public class Outer", "{", "    public class InnerSvc : MonoBehaviour", "    {", "        singleton", "    }", "}"].join("\n"), true);
+    checkS("SNIP-g nested class: snippet uses the innermost class name (InnerSvc, not Outer)",
+      snipOf("__snip__/Nested.cs", 5, 17, "Singleton").includes("public static InnerSvc Instance"));
+
+    // --- no enclosing class → editable placeholder, still valid snippet syntax
+    engine.updateFile("__snip__/Loose.cs", "using UnityEngine;\nsingleton", true);
+    const loose = snipOf("__snip__/Loose.cs", 1, 9, "Singleton");
+    checkS("SNIP-h outside any class: falls back to an editable ${1:Manager} placeholder (mirrored in nameof)",
+      loose.includes("${1:Manager} Instance") && loose.includes("nameof(${1})"));
+
+    // --- every expanded snippet parses clean (syntax only)
+    const member = ["Singleton", "SingletonPersistent", "OnEnableDisable", "EventAction", "Cooldown", "GizmoSphere"];
+    const stmt = ["TryGetComponent", "NullGuard"];
+    const all = [...member, ...stmt, "RequireComponent"];
+    const present = engine.completions("__snip__/PlayerManager.cs", 3, 4).filter((c: any) => c.kind === "snippet").map((c: any) => c.label);
+    checkS("SNIP-i all new snippets are offered by completions", all.every((l) => present.includes(l)));
+
+    // NOTE: syntax errors come from updateFile().diagnostics (semantic().syntax stays empty
+    // for broken code). Each expansion gets its own class name so duplicate-type errors
+    // can never be mistaken for (or mask) a syntax error.
+    const syntaxErrors = (src: string, tag: string) => {
+      const p = `__snip__/Expand_${tag}.cs`;
+      return engine.updateFile(p, src, true).diagnostics.filter((d: any) => d.severity === "error");
+    };
+    const bad: string[] = [];
+    for (const label of all) {
+      const body = expand(snipOf("__snip__/PlayerManager.cs", 3, 4, label));
+      let src: string;
+      if (member.includes(label)) src = `using UnityEngine;\nusing UnityEngine.Events;\npublic class ${label}Host : MonoBehaviour\n{\n${body}\n}\n`;
+      else if (stmt.includes(label)) src = `using UnityEngine;\npublic class ${label}Host : MonoBehaviour\n{\n    private void Start()\n    {\n${body}\n    }\n}\n`;
+      else src = `using UnityEngine;\n${body}\npublic class ${label}Host : MonoBehaviour { }\n`;
+      const errs = syntaxErrors(src, label);
+      if (errs.length) bad.push(`${label}: ${errs[0].message}`);
+    }
+    if (bad.length) console.log("SNIP parse failures:", bad);
+    checkS("SNIP-j every expanded snippet parses with zero syntax errors", bad.length === 0);
+
+    // --- the generated singleton is recognised by the dependency graph (self-loop badge)
+    engine.updateFile("__snip__/GraphProbe.cs",
+      `using UnityEngine;\npublic class GraphProbe : MonoBehaviour\n{\n${expand(snipOf("__snip__/PlayerManager.cs", 3, 13, "Singleton").replace(/PlayerManager/g, "GraphProbe"))}\n}\n`, true);
+    const gS = engine.dependencyGraph(null, false);
+    const probe = gS.nodes.find((n: any) => n.name === "GraphProbe");
+    checkS("SNIP-k generated singleton is detected by the dependency graph (singleton badge + self edge)",
+      probe?.singleton === true && gS.edges.some((e: any) => e.kind === "self" && e.from === probe.id && e.to === probe.id));
+
+    const failedS = resultsS.filter(([, ok]) => !ok);
+    console.log(`\n=========== Snippets RESULT: ${resultsS.length - failedS.length}/${resultsS.length} PASS ===========`);
+    for (const [name] of failedS) console.log("  FAILED:", name);
+    if (failedS.length) process.exitCode = 2;
+  }
+
   // ---- TEST56: Phase 11 — preprocessor directives (#if UNITY_EDITOR & friends) ----
   {
     const results11: [string, boolean][] = [];
