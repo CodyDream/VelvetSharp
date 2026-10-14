@@ -20,9 +20,14 @@ import {
   type AgentPayload, type OpResult, type NormalizedPayload, type PayloadIo, type TreeNode, type ApplySummary,
 } from "./agent-bridge";
 import { hydrateConfigFromDisk, configFilePath, mcpDiscoveryPath, saveConfigField } from "./configStore";
-import { getBridgeState, subscribeBridge, bridgeStats, bridgeSelfTest, forceReconnect, type BridgeState } from "./nl-bridge";
+import { getBridgeState, subscribeBridge, bridgeStats, bridgeSelfTest, forceReconnect, window as nlWindow, type BridgeState } from "./nl-bridge";
 import { startMcpServer, refreshMcpDiscovery } from "./mcp-server";
 import { APP_LABEL, APP_BUILD, APP_PHASE } from "./version"; // Phase numbering system (user request)
+import {
+  sortUsings, trimTrailingWhitespace, breadcrumbSegments, owningSymbol,
+  serializeSession, reviveSession, cycleTabIndex, nextProblemIndex,
+  type EditorSession,
+} from "./qol"; // Phase 17 — QOL pure helpers
 import fuzzysort from "fuzzysort";
 import "./index.css";
 
@@ -124,7 +129,32 @@ async function flushAutoSave(path?: string): Promise<void> {
     autoSaveTimers.delete(p);
     const tab = st.tabs.find((t) => t.path === p);
     if (!tab || tab.content === tab.original) continue;
-    try { await getAdapter().write(p, tab.content); st.markSaved(p); } catch { /* read-only */ }
+    try { await getAdapter().write(p, trimBeforeSave(p, tab.content)); st.markSaved(p); } catch { /* read-only */ }
+  }
+}
+
+/** Phase 17 — F8 / Shift+F8 jump to the next/previous project problem,
+ *  wrapping around; opens the Problems bar when it is hidden */
+function jumpProblem(back: boolean) {
+  const st = useStore.getState();
+  const problems = st.problems;
+  if (!problems.length) { st.setStatus("no problems anywhere — nice"); return; }
+  if (!st.problemsOpen) st.toggleProblems();
+  const ed = (window as any).__editor;
+  let current: { path: string | null; line: number; col: number } | null = null;
+  try {
+    const model = ed?.getModel?.();
+    const pos = ed?.getPosition?.();
+    if (model && pos) {
+      const p = decodeURIComponent(model.uri.path).replace(/^\//, "");
+      current = { path: p, line: pos.lineNumber - 1, col: pos.column - 1 };
+    }
+  } catch { /* editor gone */ }
+  const idx = nextProblemIndex(problems, current, back);
+  const target = problems[idx >= 0 ? idx : 0];
+  if (target) {
+    st.setStatus(`problem ${idx + 1}/${problems.length}${back ? " (back)" : ""}`);
+    void openAt(target.path, target.line, target.col);
   }
 }
 
@@ -346,9 +376,37 @@ async function loadWorkspace(client: BrainClient) {
   // project-wide diagnostics sweep fills the Problems bar in the background
   void sweepProject();
 
-  // open first script (cache-indexed files read their content lazily here)
-  const first = loaded.find((f) => f.path.includes("Player")) ?? loaded[0] ?? cachedEntries[0];
-  if (first) await openFileByPath(first.path);
+  // Phase 17 — the Problems bar must reflect the workspace even when the
+  // sweep is a NO-OP: the browser demo and a first desktop boot load every
+  // script up front (treeReady full), so the sweep had nothing left to fetch
+  // and recomputeProblems never ran — the bar stayed empty until the first
+  // edit. One boot-time fetch of the already-parsed diagnostics fixes that.
+  void (async () => {
+    try {
+      const cs = files.filter((f) => f.endsWith(".cs"));
+      if (!cs.length) return;
+      const res = await client.sweepChunk(cs);
+      for (const r of res?.results ?? []) {
+        syntaxByPath.set(keyOf(r.path), r.syntax);
+        semanticByPath.set(keyOf(r.path), r.sem as any);
+      }
+      recomputeProblems();
+      refreshActiveMarkers();
+    } catch { /* best-effort — the sweep still covers it on later runs */ }
+  })();
+
+  // Phase 17 — session restore: re-open the tabs the user had open in this
+  // workspace last run (before the "open first script" fallback below, which
+  // now only fires when there is no session to revive)
+  {
+    const saved = (readSessions() ?? {})[adapter.root];
+    if (saved && saved.tabs?.length) {
+      await restoreSession(client);
+    } else {
+      const first = loaded.find((f) => f.path.includes("Player")) ?? loaded[0] ?? cachedEntries[0];
+      if (first) await openFileByPath(first.path);
+    }
+  }
 }
 
 /** Re-run the workspace load after the user picked a different root.
@@ -357,6 +415,7 @@ async function reloadWorkspace() {
   const client = (window as any).__client as BrainClient | undefined;
   if (!client) return;
   const st = useStore.getState();
+  scheduleSessionSave(); // Phase 17 — persist this workspace's tabs before wiping them
   st.tabs.forEach((t) => st.closeTab(t.path));
   st.setProjects([], []);
   st.setActiveAssembly(null);
@@ -595,6 +654,7 @@ function outlineFromSymbols(symbols: UpdateFileResult["symbols"]) {
 
 function App() {
   const palette = useStore((s) => s.palette);
+  const sidebarOpen = useStore((s) => s.sidebarOpen);
   const isDesktopShell = typeof window !== "undefined" && "NL_PORT" in window;
 
   // v0.7.1 — mirror the native bridge state into the store for the status chip
@@ -604,12 +664,29 @@ function App() {
     return unsub;
   }, [isDesktopShell]);
 
+  // Phase 17 — window title follows the active document + dirty state
+  useEffect(() => {
+    syncWindowTitle();
+    const unsub = useStore.subscribe(() => syncWindowTitle());
+    return unsub;
+  }, []);
+
+  // Phase 17 — persist the open-tab session whenever tabs/active change
+  useEffect(() => {
+    const unsub = useStore.subscribe((s, prev) => {
+      if (s.tabs !== prev.tabs || s.active !== prev.active) scheduleSessionSave();
+    });
+    return unsub;
+  }, []);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // F2 — rename the symbol under the caret (editor focused or not)
       if (e.key === "F2") { e.preventDefault(); void startRename(); return; }
       // Shift+F12 — find all uses of the symbol under the caret (Phase 8)
       if (e.key === "F12" && e.shiftKey) { e.preventDefault(); (window as any).__requestUses?.(); return; }
+      // F8 / Shift+F8 — next / previous project problem (Phase 17)
+      if (e.key === "F8" && !e.ctrlKey && !e.altKey && !e.metaKey) { e.preventDefault(); jumpProblem(e.shiftKey); return; }
       // Esc — leave the dependency graph
       if (e.key === "Escape" && useStore.getState().active === "__graph__") {
         e.preventDefault(); closeGraphAction(); return;
@@ -622,6 +699,15 @@ function App() {
       if (e.altKey && (e.key === "z" || e.key === "Z") && !e.ctrlKey && !e.metaKey) {
         e.preventDefault(); useStore.getState().toggleWordWrap(); return;
       }
+      // Ctrl+Tab / Ctrl+Shift+Tab — cycle open tabs (Phase 17 QOL)
+      if (e.ctrlKey && !e.altKey && e.key === "Tab") {
+        e.preventDefault();
+        const st = useStore.getState();
+        const idx = st.tabs.findIndex((t) => t.path === st.active);
+        const next = cycleTabIndex(st.tabs.length, idx < 0 ? 0 : idx, e.shiftKey);
+        if (next >= 0 && st.tabs[next]) st.setActive(st.tabs[next].path);
+        return;
+      }
       const mod = e.ctrlKey || e.metaKey;
       if (!mod) return;
       const k = e.key.toLowerCase();
@@ -629,8 +715,13 @@ function App() {
       else if (k === "p" && e.shiftKey) { e.preventDefault(); useStore.getState().setPalette("commands"); }
       else if (k === "t") { e.preventDefault(); useStore.getState().setPalette("symbols"); }
       else if (k === "f" && e.shiftKey) { e.preventDefault(); useStore.getState().setSidebarView("search"); }
+      else if (k === "s" && e.altKey) { e.preventDefault(); void saveAllTabs(); } // Ctrl+Alt+S — Save All (Phase 17)
       else if (k === "s") { e.preventDefault(); void (async () => { await saveActive(); })(); }
-      else if (k === "w") { e.preventDefault(); const st = useStore.getState(); if (st.active === "__graph__") closeGraphAction(); else if (st.active) st.closeTab(st.active); }
+      else if (k === "w") { e.preventDefault(); const st = useStore.getState(); if (st.active === "__graph__") closeGraphAction(); else if (st.active) { st.closeTab(st.active); scheduleSessionSave(); } }
+      else if (k === "b") { e.preventDefault(); useStore.getState().toggleSidebar(); } // Ctrl+B — toggle sidebar (Phase 17)
+      else if (k === "j") { e.preventDefault(); useStore.getState().toggleProblems(); } // Ctrl+J — toggle Problems (Phase 17)
+      else if (k === ",") { e.preventDefault(); useStore.getState().setSettingsOpen(true); } // Ctrl+, — Settings (Phase 17)
+      else if (k === "n" && !e.shiftKey) { e.preventDefault(); useStore.getState().setSidebarView("explorer"); useStore.getState().setCtxMenu({ x: Math.round(window.innerWidth / 2), y: Math.round(window.innerHeight / 3), path: "Assets/Scripts", dir: true }); } // Ctrl+N — new script
       // Ctrl+= / Ctrl+- / Ctrl+0 — editor zoom (v0.7.0)
       else if (k === "=" || k === "+") { e.preventDefault(); const st = useStore.getState(); st.setFontSize(st.fontSize + 1); }
       else if (k === "-") { e.preventDefault(); const st = useStore.getState(); st.setFontSize(st.fontSize - 1); }
@@ -664,8 +755,19 @@ function App() {
   return (
     <div className="app">
       <div className="titlebar">
-        <span className="logo">◆ VelvetSharp</span>
+        <span className="logo-mark">◆</span>
+        <span className="logo">VelvetSharp</span>
         <span className="subtitle">{APP_LABEL} · lightweight Unity C# IDE</span>
+        <button
+          className="command-center"
+          title="Search files by name (Ctrl+P) · symbols (Ctrl+T) · commands (Ctrl+Shift+P)"
+          onClick={() => useStore.getState().setPalette("files")}
+          data-testid="command-center"
+        >
+          <span className="cc-glyph">⌕</span>
+          <span className="cc-text">Search files, symbols & commands…</span>
+          <span className="cc-key">Ctrl+P</span>
+        </button>
         <span className="titlebar-right">
           {browserAdapter.name === "browser-demo" ? "demo workspace" : "local workspace"}
           {/* Phase 16 (user request) — LLM managing buttons live UP TOP, not in
@@ -689,13 +791,15 @@ function App() {
           {/* v0.7.1 — dedicated settings entry point (user request: top settings button) */}
           <button
             className="settings-btn"
-            title="Settings (theme, editor, connection diagnostics)"
+            title="Settings (theme, editor, connection diagnostics) — Ctrl+,"
             onClick={() => useStore.getState().setSettingsOpen(true)}
           >⚙</button>
         </span>
       </div>
       <div className="main">
-        <MemoSidebar />
+        <ActivityRail />
+        {sidebarOpen && <MemoSidebar />}
+        <SidebarHandle />
         <MemoEditorArea />
       </div>
       <MemoStatusBar />
@@ -706,9 +810,34 @@ function App() {
       <RenameWidget />
       <ExplorerCtxMenu />
       <EditorCtxMenu />
+      <TabCtxMenu />
       <ErrorPopup />
       <SettingsModal />
     </div>
+  );
+}
+
+/** drag handle between the sidebar and the editor — resize, persisted (Phase 17) */
+function SidebarHandle() {
+  const sidebarOpen = useStore((s) => s.sidebarOpen);
+  if (!sidebarOpen) return null;
+  return (
+    <div
+      className="sidebar-handle"
+      title="drag to resize the sidebar"
+      onMouseDown={(e) => {
+        e.preventDefault();
+        const move = (ev: MouseEvent) => useStore.getState().setSidebarWidth(ev.clientX - 44); // rail is 44px
+        const up = () => {
+          window.removeEventListener("mousemove", move);
+          window.removeEventListener("mouseup", up);
+          document.body.classList.remove("resizing");
+        };
+        document.body.classList.add("resizing");
+        window.addEventListener("mousemove", move);
+        window.addEventListener("mouseup", up);
+      }}
+    />
   );
 }
 
@@ -721,12 +850,138 @@ async function saveActive() {
   const tab = st.tabs.find((t) => t.path === st.active);
   if (!tab) return;
   const adapter = getAdapter();
-  await adapter.write(tab.path, tab.content);
+  const content = trimBeforeSave(tab.path, tab.content);
+  await adapter.write(tab.path, content);
   st.markSaved(tab.path);
   st.setStatus("saved " + tab.path);
 }
 
+/** Phase 17 — Save All: flush auto-saves + write every dirty tab. Wired to
+ *  Ctrl+Alt+S and the palette. */
+async function saveAllTabs() {
+  const st = useStore.getState();
+  const dirty = st.tabs.filter((t) => t.content !== t.original);
+  if (!dirty.length) { st.setStatus("nothing to save — every open script is clean"); return; }
+  const adapter = getAdapter();
+  let n = 0;
+  for (const t of dirty) {
+    try {
+      await adapter.write(t.path, trimBeforeSave(t.path, t.content));
+      st.markSaved(t.path);
+      n++;
+    } catch { /* read-only demo — keep going */ }
+  }
+  st.setStatus(`saved ${n} script${n === 1 ? "" : "s"}`);
+}
+
+/** trim trailing whitespace before writing when the pref is on. The model is
+ *  updated too (one undo step) so the dirty dot honestly clears. */
+function trimBeforeSave(path: string, content: string): string {
+  if (!useStore.getState().trimTrailingOnSave) return content;
+  const trimmed = trimTrailingWhitespace(content);
+  if (!trimmed || trimmed === content) return content;
+  try {
+    const ed = (window as any).__editor;
+    const model = ed?.getModel?.();
+    if (model && decodeURIComponent(model.uri.path).replace(/^\//, "") === path) {
+      model.pushEditOperations([], [{ range: model.getFullModelRange(), text: trimmed }], () => null);
+      return model.getValue();
+    }
+  } catch { /* model gone — fall through to plain text */ }
+  return trimmed;
+}
+
 /* --------------------- F2 rename symbol (v0.6.0) --------------------- */
+
+/* ---------- Phase 17 — session restore + window title helpers ---------- */
+
+/** the session (open tabs + active) persists per workspace root in the global
+ *  config.json `sessions` map — tiny (≤40 paths), zero schema risk */
+const sessionFieldFor = (root: string) => root;
+
+let sessionSaveTimer: any = null;
+function scheduleSessionSave(): void {
+  clearTimeout(sessionSaveTimer);
+  sessionSaveTimer = setTimeout(() => {
+    try {
+      const s = useStore.getState();
+      const root = getAdapter().root;
+      if (!root) return;
+      const session = serializeSession(
+        s.tabs.map((t) => {
+          const ed = (window as any).__editor;
+          let cursor: { line: number; col: number } | undefined;
+          try {
+            if (ed && s.active === t.path && ed.getModel()?.uri.path === "/" + t.path) {
+              const pos = ed.getPosition();
+              if (pos) cursor = { line: pos.lineNumber - 1, col: pos.column - 1 };
+            }
+          } catch { /* editor gone */ }
+          return { path: t.path, cursor };
+        }),
+        s.active,
+      );
+      // one merged map goes to BOTH stores (desktop disk config + browser
+      // localStorage mirror — the mirror is what makes the demo testable)
+      const merged = { ...(readSessions() ?? {}), [sessionFieldFor(root)]: session };
+      saveConfigField("sessions", merged);
+      try { localStorage.setItem("velvetsharp.sessions", JSON.stringify(merged)); } catch { /* storage off */ }
+    } catch { /* best-effort */ }
+  }, 1500);
+}
+
+function readSessions(): Record<string, EditorSession> | null {
+  try {
+    const cfg = (window as any).__vsConfig;
+    if (cfg?.sessions) return cfg.sessions;
+    // browser fallback — the localStorage mirror scheduleSessionSave keeps fresh
+    const raw = localStorage.getItem("velvetsharp.sessions");
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+
+/** re-open the tabs the user had open last time in THIS workspace. Runs once
+ *  per loadWorkspace; a failed read (file deleted between runs) is skipped. */
+async function restoreSession(client: BrainClient): Promise<void> {
+  try {
+    const adapter = getAdapter();
+    const root = adapter.root;
+    if (!root) return;
+    // desktop reads the durable config; browser reads its localStorage mirror
+    const saved = (readSessions() ?? {})[sessionFieldFor(root)] as EditorSession | undefined;
+    if (!saved) return;
+    const csFiles = useStore.getState().files.filter((f) => f.endsWith(".cs"));
+    const { tabs, active } = reviveSession(saved, csFiles);
+    if (!tabs.length) return;
+    const opened: { path: string; content: string }[] = [];
+    for (const t of tabs) {
+      try { opened.push({ path: t.path, content: await adapter.read(t.path) }); } catch { /* vanished */ }
+    }
+    if (!opened.length) return;
+    useStore.setState((s) => ({
+      tabs: opened.map((o) => ({ path: o.path, content: o.content, original: o.content, cursor: tabs.find((t) => t.path === o.path)?.cursor })),
+      active: opened.some((o) => o.path === active) ? active : opened[opened.length - 1].path,
+    }));
+    void client.loadFiles(opened).catch(() => {});
+    useStore.getState().setStatus(`session restored — ${opened.length} script${opened.length === 1 ? "" : "s"} reopened`);
+  } catch { /* best-effort — a broken session file must never block boot */ }
+}
+
+/** desktop: mirror the active document into the OS window title;
+ *  browser: document.title always updates (E2E checks it) */
+let lastWindowTitle = "";
+function syncWindowTitle(): void {
+  const st = useStore.getState();
+  const dirty = st.tabs.some((t) => t.content !== t.original);
+  const name = st.active && st.active !== "__graph__" ? st.active.split("/").pop() : null;
+  const title = `${name ? name + (dirty ? " • " : " — ") : ""}VelvetSharp — ${APP_LABEL}`;
+  if (title === lastWindowTitle) return;
+  lastWindowTitle = title;
+  document.title = title;
+  if (typeof window !== "undefined" && "NL_PORT" in window) {
+    try { void Promise.resolve(nlWindow.setTitle(title)).catch(() => {}); } catch { /* bridge not up yet */ }
+  }
+}
 
 /** open the inline rename widget for the symbol under the caret */
 async function startRename() {
@@ -1586,6 +1841,14 @@ function PathPromptModal() {
 function ThemePicker() {
   const tp = useStore((s) => s.themePicker);
   const [active, setActive] = useState<string>(() => getSavedThemeId() ?? DEFAULT_THEME);
+  // Phase 17 QOL — Esc keeps the current theme and closes (non-first-run only:
+  // the first-run picker must stay until a theme is chosen)
+  useEffect(() => {
+    if (!tp || tp.firstRun) return;
+    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") useStore.getState().setThemePicker(null); };
+    window.addEventListener("keydown", esc);
+    return () => window.removeEventListener("keydown", esc);
+  }, [tp?.firstRun]);
   if (!tp) return null;
 
   const choose = (id: string) => {
@@ -1634,14 +1897,75 @@ function ThemePicker() {
 
 /* ------------------------------ sidebar ------------------------------ */
 
+/** open folder set lives at module level so the Activity Rail / breadcrumbs can
+ *  reveal + expand paths without prop drilling (Phase 17) */
+const explorerOpenDirs = new Set<string>(["Assets", "Assets/Scripts"]);
+
+/** expand every ancestor folder of `path` in the explorer tree */
+function revealInExplorer(path: string): void {
+  const parts = path.split("/");
+  for (let i = 1; i < parts.length; i++) explorerOpenDirs.add(parts.slice(0, i).join("/"));
+}
+
+/** the vertical icon rail — Explorer / Search / Outline / Problems / Graph /
+ *  Agent, settings at the bottom (Phase 17 UI overhaul: the cramped top
+ *  tab-row is replaced by a VS Code-style activity bar) */
+function ActivityRail() {
+  const view = useStore((s) => s.sidebarView);
+  const sidebarOpen = useStore((s) => s.sidebarOpen);
+  const problems = useStore((s) => s.problems);
+  const problemsOpen = useStore((s) => s.problemsOpen);
+  const agentBridge = useStore((s) => s.agentBridge);
+  const graphOpen = useStore((s) => s.graphOpen);
+  const errors = problems.filter((p) => p.severity === "error").length;
+  const warns = problems.length - errors;
+  const openView = (v: "explorer" | "search" | "outline") => {
+    const st = useStore.getState();
+    if (st.sidebarView === v && st.sidebarOpen) st.toggleSidebar(); // click active icon again = collapse
+    else { if (!st.sidebarOpen) st.toggleSidebar(); st.setSidebarView(v); }
+  };
+  const railBtn = (glyph: string, label: string, active: boolean, onClick: () => void, badge?: { text: string; cls: string }) => (
+    <button
+      className={"rail-btn" + (active ? " active" : "")}
+      title={label}
+      aria-label={label}
+      onClick={onClick}
+    >
+      <span className="rail-glyph">{glyph}</span>
+      {badge && <span className={"rail-badge " + badge.cls}>{badge.text}</span>}
+    </button>
+  );
+  return (
+    <div className="activity-rail" data-testid="activity-rail">
+      <div className="rail-group">
+        {railBtn("⛁", "Explorer (Ctrl+B toggles the panel)", sidebarOpen && view === "explorer", () => openView("explorer"))}
+        {railBtn("⌕", "Search across the project (Ctrl+Shift+F)", sidebarOpen && view === "search", () => openView("search"))}
+        {railBtn("≣", "Outline of the active script", sidebarOpen && view === "outline", () => openView("outline"))}
+        {railBtn("⚠", problemsOpen ? "Hide Problems (Ctrl+J)" : "Show Problems (Ctrl+J)", problemsOpen, () => useStore.getState().toggleProblems(),
+          errors ? { text: String(errors), cls: "err" } : warns ? { text: String(warns), cls: "warn" } : undefined)}
+        {railBtn("⬡", "Dependency graph / Call Flow", graphOpen, () => {
+          const st = useStore.getState();
+          if (st.graphOpen && st.active === "__graph__") closeGraphAction();
+          else st.openGraph(null);
+        })}
+        {railBtn("✨", "Agent Bridge — hand structure to a web AI / apply its JSON", !!agentBridge, () => useStore.getState().setAgentBridge({ tab: "structure" }))}
+      </div>
+      <div className="rail-group rail-bottom">
+        {railBtn("⚙", "Settings (Ctrl+,)", useStore.getState().settingsOpen, () => useStore.getState().setSettingsOpen(true))}
+      </div>
+    </div>
+  );
+}
+
 function Sidebar() {
   const view = useStore((st) => st.sidebarView);
-  const setView = useStore((st) => st.setSidebarView);
   const hideMeta = useStore((st) => st.hideMeta);
   const toggleHideMeta = useStore((st) => st.toggleHideMeta);
   const files = useStore((st) => st.files);
-  const openDirsRef = useRef<Set<string>>(new Set(["Assets", "Assets/Scripts"]));
+  const active = useStore((st) => st.active);
+  const sidebarWidth = useStore((st) => st.sidebarWidth);
   const [, force] = useState(0);
+  const [filter, setFilter] = useState("");
 
   const visible = useMemo(
     () => files.filter((f) => !hideMeta || !f.endsWith(".meta")),
@@ -1649,25 +1973,57 @@ function Sidebar() {
   );
   const tree = useMemo(() => buildTree(visible), [visible]);
 
+  // Phase 17 — auto-reveal: switching to a tab expands its folder chain so the
+  // active file is always visible in the tree (no more hunting for it)
+  useEffect(() => {
+    if (!active || active === "__graph__" || !active.endsWith(".cs")) return;
+    if (!files.length) return;
+    const before = explorerOpenDirs.size;
+    revealInExplorer(active);
+    if (explorerOpenDirs.size !== before) force((x) => x + 1);
+  }, [active]);
+
   const toggleDir = (path: string) => {
-    const next = openDirsRef.current;
+    const next = explorerOpenDirs;
     next.has(path) ? next.delete(path) : next.add(path);
     force((x) => x + 1);
   };
 
+  const fl = filter.trim().toLowerCase();
+  const filtered = useMemo(() => {
+    if (!fl) return null;
+    return visible.filter((f) => f.toLowerCase().includes(fl)).slice(0, 120);
+  }, [visible, fl]);
+
   return (
-    <div className="sidebar">
-      <div className="sidebar-tabs">
-        <button className={view === "explorer" ? "active" : ""} onClick={() => setView("explorer")} title="Explorer">⛁</button>
-        <button className={view === "search" ? "active" : ""} onClick={() => setView("search")} title="Search (Ctrl+Shift+F)">⌕</button>
-        <button className={view === "outline" ? "active" : ""} onClick={() => setView("outline")} title="Outline">≣</button>
-        <span className="spacer" />
-        <button onClick={toggleHideMeta} title="Toggle .meta files">{hideMeta ? "◉" : "○"}</button>
-      </div>
+    <div className="sidebar" style={{ width: sidebarWidth, minWidth: sidebarWidth }}>
       {view === "search" ? <SearchPanel inline /> : view === "outline" ? <OutlinePanel /> : (
         <div className="explorer">
-          <div className="section-title">EXPLORER</div>
-          <TreeNode node={tree} openDirs={openDirsRef.current} toggleDir={toggleDir} depth={0} isRoot />
+          <div className="explorer-head">
+            <div className="section-title">EXPLORER</div>
+            <input
+              className="explorer-filter"
+              placeholder="filter files…"
+              value={filter}
+              spellCheck={false}
+              onChange={(e) => setFilter(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); setFilter(""); } }}
+              title="filter the tree by name — Esc clears"
+            />
+          </div>
+          {filtered
+            ? (filtered.length
+              ? <div className="explorer-flat">
+                {filtered.map((f) => (
+                  <div key={f} className={"file" + (active === f ? " active" : "")} style={{ paddingLeft: 8 }}
+                    onClick={async () => { try { useStore.getState().openFile(f, await getAdapter().read(f)); } catch { /* ignore */ } }}>
+                    <span className={"file-icon " + iconFor(f)}>{tabGlyph(f)}</span>
+                    <span className="file-flat-name" title={f}>{f}</span>
+                  </div>
+                ))}
+              </div>
+              : <div className="outline-empty">no files match “{filter}”</div>)
+            : <TreeNode node={tree} openDirs={explorerOpenDirs} toggleDir={toggleDir} depth={0} isRoot />}
         </div>
       )}
     </div>
@@ -1757,7 +2113,7 @@ function TreeNode({ node, openDirs, toggleDir, depth, isRoot = false }: {
           useStore.getState().setCtxMenu({ x: e.clientX, y: e.clientY, path: node.path, dir: false });
         }}
       >
-        <span className={"file-icon " + iconFor(node.name)}>{iconFor(node.name) === "cs" ? "⌾" : "≡"}</span>
+        <span className={"file-icon " + iconFor(node.name)}>{tabGlyph(node.name)}</span>
         {node.name}{dirty && <span className="dirty">●</span>}
       </div>
     );
@@ -1792,6 +2148,16 @@ function iconFor(name: string): string {
   if (name.endsWith(".meta")) return "meta";
   if (name.endsWith(".unity")) return "scene";
   return "txt";
+}
+
+/** Phase 17 — letter glyphs instead of the old generic dots: `C#` for scripts,
+ *  M for meta, S for scenes, T for other text files */
+function tabGlyph(name: string): string {
+  const k = iconFor(name);
+  if (k === "cs") return "C#";
+  if (k === "meta") return "M";
+  if (k === "scene") return "S";
+  return "T";
 }
 
 /* ------------------------------ outline ------------------------------ */
@@ -1831,6 +2197,84 @@ function jumpToLine(line: number, col: number) {
   ed.revealLineInCenter(line + 1);
   ed.setPosition({ lineNumber: line + 1, column: col + 1 });
   ed.focus();
+}
+
+/* --------------------- breadcrumbs (Phase 17 UI overhaul) --------------------- */
+
+/** path + active-symbol breadcrumb strip above the editor: click a folder
+ *  segment to reveal it in the explorer, click the symbol chip to open the
+ *  symbol dropdown for the caret's line */
+function Breadcrumbs() {
+  const active = useStore((s) => s.active);
+  const outline = useStore((s) => s.outline);
+  const [caretLine, setCaretLine] = useState(0);
+  const [symOpen, setSymOpen] = useState(false);
+
+  useEffect(() => { setSymOpen(false); }, [active]);
+
+  // track the caret line so the symbol chip follows the cursor (cheap: one
+  // listener while this component is mounted)
+  useEffect(() => {
+    const ed = (window as any).__editor;
+    if (!ed) return;
+    const update = () => {
+      try { const pos = ed.getPosition(); if (pos) setCaretLine(pos.lineNumber - 1); } catch { /* gone */ }
+    };
+    update();
+    const d = ed.onDidChangeCursorPosition(() => update());
+    return () => { try { d.dispose?.(); } catch { /* gone */ } };
+  }, [active]);
+
+  if (!active || active === "__graph__" || !active.endsWith(".cs")) return null;
+  const segs = breadcrumbSegments(active);
+  const sym = owningSymbol(outline, caretLine);
+  return (
+    <div className="breadcrumbs" data-testid="breadcrumbs">
+      {segs.map((seg, i) => {
+        const isFile = i === segs.length - 1;
+        const dirPath = segs.slice(0, i + 1).join("/");
+        return (
+          <span key={i} className="crumb-wrap">
+            {i > 0 && <span className="crumb-sep">›</span>}
+            <span
+              className={"crumb" + (isFile ? " crumb-file" : "")}
+              onClick={() => {
+                if (isFile) return;
+                revealInExplorer(active);
+                useStore.getState().setSidebarView("explorer");
+                if (!useStore.getState().sidebarOpen) useStore.getState().toggleSidebar();
+                useStore.getState().setStatus("revealed " + dirPath + " in the explorer");
+              }}
+              title={isFile ? active : "reveal " + dirPath + " in the explorer"}
+            >
+              {seg}
+            </span>
+          </span>
+        );
+      })}
+      {sym && (
+        <span className="crumb-wrap">
+          <span className="crumb-sep">›</span>
+          <span className={"crumb crumb-sym " + sym.kind} onClick={() => setSymOpen((v) => !v)} title="symbols in this file — click to jump">
+            <span className={"k " + sym.kind}>{KIND_GLYPH[sym.kind] ?? "·"}</span> {sym.name}
+          </span>
+          {symOpen && (
+            <div className="crumb-sym-menu">
+              {outline.slice(0, 40).map((o, i) => (
+                <div key={i} className={"outline-item"} style={{ paddingLeft: 8 + o.depth * 12 }}
+                  onClick={() => { setSymOpen(false); jumpToLine(o.line, o.col); }}>
+                  <span className={"k " + o.kind}>{KIND_GLYPH[o.kind] ?? "·"}</span>
+                  <span className="outline-name">{o.name}</span>
+                  {o.isMessage && <span className="unity-badge" title="Unity event function">U</span>}
+                  <span className="ln">{o.line + 1}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </span>
+      )}
+    </div>
+  );
 }
 
 /* ------------------------- problems bar (v0.5.0) ------------------------- */
@@ -1948,7 +2392,7 @@ function ProblemsBar() {
         <span className={"pb-count" + (warnings ? " has-warnings" : "")}>⚠ {warnings} warning{warnings === 1 ? "" : "s"}</span>
         <span className="pb-hint">
           {open
-            ? "jump: click a row · copy 1: right-click it · copy many: Ctrl+click then Ctrl+C (all: Ctrl+A first)"
+            ? "jump: click a row · copy 1: right-click it · copy many: Ctrl+click then Ctrl+C (all: Ctrl+A first) · F8 next"
             : "click to expand — every script in the project is swept automatically"}
         </span>
       </div>
@@ -2122,11 +2566,12 @@ function EditorArea() {
   // host mounts
   const attachHost = useCallback((el: HTMLDivElement | null) => {
     if (el && !edRef.current) {
+      const st0 = useStore.getState();
       edRef.current = monaco.editor.create(el, {
         theme: "velvet-dark",
         language: CSHARP_LANG,
         automaticLayout: true,
-        minimap: { enabled: true, size: "proportional", scale: 1 },
+        minimap: { enabled: st0.minimap, size: "proportional", scale: 1 },
         fontSize: 13.5,
         fontFamily: "'Cascadia Code', 'JetBrains Mono', Consolas, monospace",
         fontLigatures: true,
@@ -2139,7 +2584,10 @@ function EditorArea() {
         renderLineHighlight: "all",
         padding: { top: 10 },
         scrollBeyondLastLine: false,
-        stickyScroll: { enabled: true },
+        stickyScroll: { enabled: st0.stickyScroll },
+        renderWhitespace: st0.renderWhitespace ? "selection" : "none", // Phase 17 pref
+        dragAndDrop: true, // Phase 17 — drag selections instead of only copy/paste
+        cursorSurroundingLines: 6, // Phase 17 — keep the caret context visible when moving
         // Phase 11 — /// suggestion accepts on Enter ("typed and enter"), and
         // the fold gutter is always visible next to the new folding provider
         acceptSuggestionOnEnter: "on",
@@ -2166,6 +2614,20 @@ function EditorArea() {
       edRef.current.onDidChangeCursorPosition((e: any) => {
         const el2 = document.getElementById("cursor-pos");
         if (el2) el2.textContent = `Ln ${e.position.lineNumber}, Col ${e.position.column}`;
+      });
+      // Phase 17 — selection info (chars/lines) in the status bar, DOM-updated
+      // like cursor-pos so typing never re-renders the app
+      edRef.current.onDidChangeCursorSelection((e: any) => {
+        const el3 = document.getElementById("sel-info");
+        if (!el3) return;
+        try {
+          const sel = e.selection;
+          if (!sel || sel.isEmpty()) { el3.textContent = ""; return; }
+          const model = edRef.current.getModel?.();
+          const chars = model ? model.getValueInRange(sel).length : 0;
+          const lines = Math.abs(sel.endLineNumber - sel.startLineNumber) + 1;
+          el3.textContent = ` · sel ${chars} char${chars === 1 ? "" : "s"}${lines > 1 ? ` on ${lines} lines` : ""}`;
+        } catch { el3.textContent = ""; }
       });
 
       // ---- Phase 8 — usages panel triggers ----
@@ -2242,12 +2704,25 @@ function EditorArea() {
   // v0.7.0 — word wrap + font size live-apply to the editor
   const wordWrap = useStore((s) => s.wordWrap);
   const fontSize = useStore((s) => s.fontSize);
+  // Phase 17 — minimap / sticky scroll / whitespace prefs live-apply
+  const minimap = useStore((s) => s.minimap);
+  const stickyScroll = useStore((s) => s.stickyScroll);
+  const renderWhitespace = useStore((s) => s.renderWhitespace);
   useEffect(() => {
     edRef.current?.updateOptions({ wordWrap: wordWrap ? "on" : "off" });
   }, [wordWrap]);
   useEffect(() => {
     edRef.current?.updateOptions({ fontSize });
   }, [fontSize]);
+  useEffect(() => {
+    edRef.current?.updateOptions({ minimap: { enabled: minimap } });
+  }, [minimap]);
+  useEffect(() => {
+    edRef.current?.updateOptions({ stickyScroll: { enabled: stickyScroll } });
+  }, [stickyScroll]);
+  useEffect(() => {
+    edRef.current?.updateOptions({ renderWhitespace: renderWhitespace ? "selection" : "none" });
+  }, [renderWhitespace]);
 
   // refresh outline when switching files
   useEffect(() => {
@@ -2261,12 +2736,13 @@ function EditorArea() {
 
   if (!active && !loading) {
     const adapter = getAdapter();
+    const recents = getRecents();
     return (
       <div className="editor-area">
-        <div className="welcome">
+        <div className="welcome welcome-v2">
           <div className="welcome-logo">◆</div>
           <h1>VelvetSharp</h1>
-          <p>Lightweight Unity C# IDE — custom intelligence engine, zero .NET required.</p>
+          <p className="welcome-tag">Lightweight Unity C# IDE — custom intelligence engine, zero .NET required.</p>
           {isDesktop && (
             <div className="welcome-actions">
               <button className="btn btn-primary" onClick={async () => {
@@ -2276,17 +2752,51 @@ function EditorArea() {
               {!!adapter.root && <span className="welcome-root" title={adapter.root}>{baseName(adapter.root)}</span>}
             </div>
           )}
-          <ul>
-            <li><b>Ctrl+P</b> quick open · <b>Ctrl+Shift+P</b> commands · <b>Ctrl+T</b> symbols</li>
-            <li><b>Ctrl+Shift+F</b> search · <b>F12</b> go to definition · <b>F2</b> rename symbol project-wide · <b>Alt+Left/Right</b> navigate back/forward · <b>Ctrl+Wheel</b> zoom</li>
-            <li>Select any method/variable → the <b>uses panel</b> shows every place it is used and where it comes from</li>
-            <li><b>⚡ Call Flow</b> (graph view, or Ctrl+Shift+P → "Call Flow") — how one script's methods call each other; outside calls end as dashed terminals</li>
-            <li><b>#if UNITY_EDITOR</b> and friends are first-class: false branches dim, <b>#pragma warning</b> is honored, right-click → <b>Collapse ▸</b> folds methods/regions/docs</li>
-            <li>Type <code>///</code> above a method and press <b>Enter</b> — the XML documentation skeleton inserts itself</li>
-            <li><b>⬡</b> dependency graph — left-click the ⬡ on a folder or right-click it (4 layouts)</li>
-            <li>Type <code>transform.</code>, <code>rb.</code>, or <code>Aw</code> in a class body to feel the brain</li>
-            <li>Unity messages (<b>Awake / Start / Update</b>) complete at class member level</li>
-          </ul>
+          {!!recents.length && isDesktop && (
+            <div className="welcome-recents">
+              <span className="welcome-recents-label">recent:</span>
+              {recents.map((r) => (
+                <button key={r} className="recent-chip" title={r} onClick={async () => {
+                  const ad = getAdapter();
+                  if (ad.setRoot && await ad.setRoot(r)) await reloadWorkspace();
+                }}>{baseName(r)}</button>
+              ))}
+            </div>
+          )}
+          <div className="welcome-grid">
+            <div className="welcome-card">
+              <div className="wc-title">⌨ Essentials</div>
+              <ul>
+                <li><b>Ctrl+P</b> quick open · <b>Ctrl+T</b> symbols · <b>Ctrl+Shift+P</b> commands</li>
+                <li><b>Ctrl+Shift+F</b> search everywhere · <b>F12</b> go to definition · <b>F2</b> rename project-wide</li>
+                <li><b>Alt+Left/Right</b> navigate back/forward · <b>Ctrl+Tab</b> cycle tabs</li>
+              </ul>
+            </div>
+            <div className="welcome-card">
+              <div className="wc-title">🧠 The brain</div>
+              <ul>
+                <li>Type <code>transform.</code>, <code>rb.</code> or <code>Aw</code> in a class body to feel the completions</li>
+                <li>Select any method/variable → the <b>uses panel</b> lists every reference + origin</li>
+                <li>Unity messages (<b>Awake / Start / Update</b>) complete at member level</li>
+              </ul>
+            </div>
+            <div className="welcome-card">
+              <div className="wc-title">⚡ Views</div>
+              <ul>
+                <li><b>⬡ Dependencies</b> — 4 layouts, folder-scoped; <b>Call Flow</b> shows who calls whom</li>
+                <li><b>#if UNITY_EDITOR</b> false branches dim, <b>#pragma warning</b> honored, right-click → Collapse ▸</li>
+                <li><code>///</code> + Enter above a member inserts the XML doc skeleton</li>
+              </ul>
+            </div>
+            <div className="welcome-card">
+              <div className="wc-title">✨ AI hand-off</div>
+              <ul>
+                <li><b>⧉ Structure → AI</b> copies a pickable project tree for web assistants</li>
+                <li><b>⇩ Apply JSON ← AI</b> executes the agent's payload (create/modify/delete/move)</li>
+                <li>MCP (<code>mcp/server.mjs</code>) serves local agents the same data live</li>
+              </ul>
+            </div>
+          </div>
           {error && <div className="errbox">{error}</div>}
         </div>
       </div>
@@ -2310,6 +2820,7 @@ function EditorArea() {
           </div>
         )}
       </div>
+      <Breadcrumbs />
       <ProblemsBar />
       <UsesBar />
       {showGraph ? (
@@ -2325,15 +2836,118 @@ function TabChip({ path, isActive }: { path: string; isActive: boolean }) {
     const t = s.tabs.find((x) => x.path === path);
     return !!t && t.content !== t.original;
   });
+  // Phase 17 — HTML5 drag to reorder tabs
   return (
-    <div className={"tab" + (isActive ? " active" : "")} onClick={() => useStore.getState().setActive(path)}>
+    <div
+      className={"tab" + (isActive ? " active" : "")}
+      draggable
+      onDragStart={(e) => { e.dataTransfer.setData("text/vs-tab", path); e.dataTransfer.effectAllowed = "move"; }}
+      onDragOver={(e) => { if (e.dataTransfer.types.includes("text/vs-tab")) { e.preventDefault(); e.dataTransfer.dropEffect = "move"; } }}
+      onDrop={(e) => {
+        e.preventDefault(); e.stopPropagation();
+        const from = e.dataTransfer.getData("text/vs-tab");
+        if (!from || from === path) return;
+        const idx = useStore.getState().tabs.findIndex((t) => t.path === path);
+        useStore.getState().moveTab(from, idx);
+        scheduleSessionSave();
+      }}
+      onClick={() => useStore.getState().setActive(path)}
+      onAuxClick={(e) => {
+        // middle-click closes the tab (standard editor behavior, Phase 17)
+        if (e.button === 1) { e.preventDefault(); useStore.getState().closeTab(path); scheduleSessionSave(); }
+      }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        useStore.getState().setTabCtxMenu({ x: e.clientX, y: e.clientY, path });
+      }}
+      title={path}
+    >
+      <span className={"tab-icon " + iconFor(path)}>{tabGlyph(path)}</span>
       <span className="tab-name">{path.split("/").pop()}</span>
-      {dirty && <span className="dirty">●</span>}
-      <span className="tab-close" onClick={(e) => { e.stopPropagation(); useStore.getState().closeTab(path); }}>×</span>
+      {dirty
+        ? <span className="dirty tab-dirty" title="unsaved changes">●</span>
+        : <span className="tab-close" onClick={(e) => { e.stopPropagation(); useStore.getState().closeTab(path); scheduleSessionSave(); }}>×</span>}
     </div>
   );
 }
 const MemoTabChip = React.memo(TabChip);
+
+/** tab right-click menu — Close / Close Others / Close All / Close Saved /
+ *  Copy Path (Phase 17 QOL) */
+function TabCtxMenu() {
+  const menu = useStore((s) => s.tabCtxMenu);
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => useStore.getState().setTabCtxMenu(null);
+    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
+    window.addEventListener("mousedown", close);
+    window.addEventListener("resize", close);
+    window.addEventListener("keydown", esc);
+    return () => {
+      window.removeEventListener("mousedown", close);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("keydown", esc);
+    };
+  }, [menu?.x, menu?.y]);
+  if (!menu) return null;
+  const st = useStore.getState();
+  const close = () => st.setTabCtxMenu(null);
+  const run = (fn: () => void) => { close(); fn(); scheduleSessionSave(); };
+  const closeOthers = () => st.tabs.filter((t) => t.path !== menu.path).forEach((t) => st.closeTab(t.path));
+  const closeSaved = () => st.tabs.filter((t) => t.content === t.original && t.path !== menu.path).forEach((t) => st.closeTab(t.path));
+  const W = 240, H = 190;
+  return (
+    <div className="ctx-layer" onMouseDown={close} onContextMenu={(e) => { e.preventDefault(); close(); }}>
+      <div className="ctx-menu" style={{
+        left: Math.max(8, Math.min(menu.x, window.innerWidth - W - 8)),
+        top: Math.max(8, Math.min(menu.y, window.innerHeight - H - 8)),
+      }} onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
+        <div className="ctx-item" onClick={() => run(() => st.closeTab(menu.path))}><span className="ctx-glyph">×</span> Close <span className="ctx-key">Ctrl+W</span></div>
+        <div className="ctx-item" onClick={() => run(closeOthers)}><span className="ctx-glyph">≡</span> Close Others</div>
+        <div className="ctx-item" onClick={() => run(closeSaved)}><span className="ctx-glyph">◍</span> Close Saved</div>
+        <div className="ctx-item" onClick={() => run(() => st.tabs.forEach((t) => st.closeTab(t.path)))}><span className="ctx-glyph">✕</span> Close All</div>
+        <div className="ctx-sep" />
+        <div className="ctx-item" onClick={() => run(() => void copyTextSmart(getAdapter().root ? menu.path : menu.path))}><span className="ctx-glyph">⧉</span> Copy Relative Path</div>
+        <div className="ctx-item" onClick={() => run(() => void copyTextSmart(joinRoot(menu.path)))}><span className="ctx-glyph">⧉</span> Copy Full Path</div>
+      </div>
+    </div>
+  );
+}
+
+/** clipboard with the Problems-bar fallback chain (async API → native → execCommand) */
+async function copyTextSmart(text: string): Promise<void> {
+  let ok = false;
+  try { await navigator.clipboard.writeText(text); ok = true; } catch { /* fall through */ }
+  if (!ok) {
+    try {
+      const res: boolean = await Promise.race([
+        import("./nl-bridge").then((m: any) => m?.clipboard?.writeText?.(text)).then(() => true).catch(() => false),
+        new Promise<boolean>((res) => setTimeout(() => res(false), 2500)),
+      ]);
+      ok = res === true;
+    } catch { /* not available */ }
+  }
+  if (!ok) {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+    } catch { ok = false; }
+  }
+  useStore.getState().setStatus(ok ? "copied to clipboard" : "clipboard copy failed");
+}
+
+/** workspace root + relative path (desktop); browser demo → relative only */
+function joinRoot(rel: string): string {
+  const root = getAdapter().root;
+  if (!root) return rel;
+  return root.replace(/[\\/]+$/, "") + "/" + rel;
+}
 
 /* ---------------------------- status bar ---------------------------- */
 
@@ -2387,13 +3001,16 @@ function StatusBar() {
         <button
           className="err-count"
           onClick={() => useStore.getState().toggleProblems()}
-          title="Toggle the Problems bar (project-wide)"
+          title="Toggle the Problems bar (project-wide) — F8 jumps to the next problem"
         >
           ✖ {s.errors} · ⚠ {warnCount}
         </button>
       )}
       <span id="cursor-pos">Ln 1, Col 1</span>
-      <span>{s.status}</span>
+      <span id="sel-info" className="sel-info"></span>
+      {/* Phase 17 — the status message flashes on change (key remount) instead
+          of sitting as undifferentiated grey text */}
+      <span className="status-msg" key={s.status}>{s.status}</span>
       {/* Phase chip — always visible so the shipped version is never ambiguous again */}
       <button
         className="asm-chip version-chip"
@@ -2487,6 +3104,28 @@ function Palette() {
     { label: "Preferences: Select Color Theme…", run: () => useStore.getState().setThemePicker({ firstRun: false }) },
     { label: "View: Toggle Word Wrap (Alt+Z)", run: () => useStore.getState().toggleWordWrap() },
     { label: "File: Toggle Auto-Save", run: () => { useStore.getState().toggleAutoSave(); useStore.getState().setStatus("auto-save " + (useStore.getState().autoSave ? "ON" : "OFF")); } },
+    // Phase 17 — editor preference commands
+    { label: "View: Toggle Minimap", run: () => useStore.getState().toggleMinimap() },
+    { label: "View: Toggle Sticky Scroll", run: () => useStore.getState().toggleStickyScroll() },
+    { label: "View: Toggle Whitespace Visibility", run: () => useStore.getState().toggleRenderWhitespace() },
+    { label: "File: Trim Trailing Whitespace on Save", run: () => useStore.getState().toggleTrimTrailing() },
+    { label: "View: Toggle Sidebar (Ctrl+B)", run: () => useStore.getState().toggleSidebar() },
+    { label: "View: Toggle Problems Bar (Ctrl+J)", run: () => useStore.getState().toggleProblems() },
+    { label: "File: Save All (Ctrl+Alt+S)", run: () => void saveAllTabs() },
+    { label: "Edit: Sort Usings", run: () => {
+      const st = useStore.getState();
+      const tab = st.tabs.find((t) => t.path === st.active);
+      const ed = (window as any).__editor;
+      if (!tab || !ed) { st.setStatus("sort usings: open a script first"); return; }
+      const sorted = sortUsings(tab.content);
+      if (!sorted) { st.setStatus("sort usings: nothing to change"); return; }
+      const model = ed.getModel?.();
+      if (model) {
+        model.pushEditOperations([], [{ range: model.getFullModelRange(), text: sorted }], () => null);
+        ed.focus();
+      }
+      st.setStatus("usings sorted (System first, then the rest, dupes removed)");
+    } },
     { label: "File: New C# Script…", run: () => {
       useStore.getState().setSidebarView("explorer");
       useStore.getState().setCtxMenu({ x: Math.round(window.innerWidth / 2), y: Math.round(window.innerHeight / 3), path: "Assets/Scripts", dir: true });
@@ -2508,6 +3147,8 @@ function Palette() {
     // Phase 10 — navigation history
     { label: "Navigate: Go Back (Alt+Left)", run: () => navGo(-1) },
     { label: "Navigate: Go Forward (Alt+Right)", run: () => navGo(1) },
+    { label: "Go to Next Problem (F8)", run: () => jumpProblem(false) },
+    { label: "Go to Previous Problem (Shift+F8)", run: () => jumpProblem(true) },
     { label: "View: Toggle Explorer", run: () => useStore.getState().setSidebarView("explorer") },
     { label: "Search: Find in Project Files (Ctrl+Shift+F)", run: () => useStore.getState().setSidebarView("search") },
     { label: "AI: MCP Connection Info (for external agents)", run: () => useStore.getState().setSettingsOpen(true) },
@@ -3264,6 +3905,13 @@ function SettingsModal() {
   const [selfTest, setSelfTest] = useState<string>("");
   const [mcpPath, setMcpPath] = useState("");
   const [mcpTools, setMcpTools] = useState<string[]>([]);
+  // Phase 17 QOL — Esc closes Settings like every other modal
+  useEffect(() => {
+    if (!open) return;
+    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") useStore.getState().setSettingsOpen(false); };
+    window.addEventListener("keydown", esc);
+    return () => window.removeEventListener("keydown", esc);
+  }, [open]);
   useEffect(() => {
     if (!open) { setSelfTest(""); return; }
     configFilePath().then(setCfgPath).catch(() => setCfgPath(""));

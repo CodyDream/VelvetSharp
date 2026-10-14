@@ -20,6 +20,13 @@ export interface VelvetConfig {
   fontSize?: number;
   root?: string;
   recents?: string[];
+  // Phase 17 — editor QOL prefs + per-workspace open-tab sessions
+  minimap?: boolean;
+  stickyScroll?: boolean;
+  renderWhitespace?: boolean;
+  trimTrailing?: boolean;
+  sidebarWidth?: number;
+  sessions?: Record<string, import("./qol").EditorSession>;
 }
 
 /** localStorage key → config field */
@@ -122,6 +129,13 @@ export async function hydrateConfigFromDisk(): Promise<VelvetConfig | null> {
   if (typeof cfg.fontSize === "number") put("velvetsharp.fontSize", String(cfg.fontSize));
   if (cfg.root) put("velvetsharp.workspace.root", String(cfg.root));
   if (Array.isArray(cfg.recents)) put("velvetsharp.workspace.recents", JSON.stringify(cfg.recents.slice(0, 5)));
+  // Phase 17 — QOL prefs hydrate the same way (localStorage wins when present)
+  if (typeof cfg.minimap === "boolean") put("velvetsharp.minimap", cfg.minimap ? "1" : "0");
+  if (typeof cfg.stickyScroll === "boolean") put("velvetsharp.stickyScroll", cfg.stickyScroll ? "1" : "0");
+  if (typeof cfg.renderWhitespace === "boolean") put("velvetsharp.renderWhitespace", cfg.renderWhitespace ? "1" : "0");
+  if (typeof cfg.trimTrailing === "boolean") put("velvetsharp.trimTrailing", cfg.trimTrailing ? "1" : "0");
+  if (typeof cfg.sidebarWidth === "number") put("velvetsharp.sidebarWidth", String(Math.max(170, Math.min(520, cfg.sidebarWidth))));
+  (window as any).__vsConfig = cfg; // Phase 17 — session map reads this directly
   return cfg;
 }
 

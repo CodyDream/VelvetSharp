@@ -90,6 +90,23 @@ interface VSState {
   fontSize: number;
   eol: "\n" | "\r\n";                 // EOL of the ACTIVE document (status chip)
 
+  // Phase 17 — UI overhaul + QOL preferences (all persisted)
+  sidebarOpen: boolean;               // Ctrl+B collapses the whole sidebar
+  sidebarWidth: number;               // drag-resized sidebar width (px)
+  minimap: boolean;                   // editor minimap
+  stickyScroll: boolean;              // sticky class/namespace header
+  renderWhitespace: boolean;          // show whitespace on selection (vs none)
+  trimTrailingOnSave: boolean;        // strip trailing spaces/tabs when saving
+  tabCtxMenu: null | { x: number; y: number; path: string };
+  setTabCtxMenu: (m: VSState["tabCtxMenu"]) => void;
+  toggleSidebar: () => void;
+  setSidebarWidth: (w: number) => void;
+  toggleMinimap: () => void;
+  toggleStickyScroll: () => void;
+  toggleRenderWhitespace: () => void;
+  toggleTrimTrailing: () => void;
+  moveTab: (fromPath: string, toIndex: number) => void;
+
   // outline of the active document
   outline: OutlineEntry[];
 
@@ -155,6 +172,16 @@ interface VSState {
   setEol: (e: "\n" | "\r\n") => void;
 }
 
+/** localStorage-backed boolean pref with a default (Phase 17) */
+function boolPref(key: string, def: boolean): boolean {
+  try {
+    const raw = localStorage.getItem("velvetsharp." + key);
+    if (raw === "1") return true;
+    if (raw === "0") return false;
+  } catch { /* storage off */ }
+  return def;
+}
+
 export const useStore = create<VSState>((set) => ({
   files: [],
   tabs: [],
@@ -218,6 +245,59 @@ export const useStore = create<VSState>((set) => ({
     } catch { return 13.5; }
   })(),
   eol: "\n",
+  sidebarOpen: true,
+  sidebarWidth: (() => {
+    try {
+      const v = parseInt(localStorage.getItem("velvetsharp.sidebarWidth") ?? "", 10);
+      return Number.isFinite(v) && v >= 170 && v <= 520 ? v : 250;
+    } catch { return 250; }
+  })(),
+  minimap: boolPref("minimap", true),
+  stickyScroll: boolPref("stickyScroll", true),
+  renderWhitespace: boolPref("renderWhitespace", false),
+  trimTrailingOnSave: boolPref("trimTrailing", false),
+  tabCtxMenu: null,
+  setTabCtxMenu: (tabCtxMenu) => set({ tabCtxMenu }),
+  toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
+  setSidebarWidth: (sidebarWidth) => {
+    const w = Math.max(170, Math.min(520, Math.round(sidebarWidth)));
+    set({ sidebarWidth: w });
+    try { localStorage.setItem("velvetsharp.sidebarWidth", String(w)); } catch { /* storage off */ }
+  },
+  toggleMinimap: () => set((s) => {
+    const minimap = !s.minimap;
+    try { localStorage.setItem("velvetsharp.minimap", minimap ? "1" : "0"); } catch { /* storage off */ }
+    saveConfigField("minimap", minimap);
+    return { minimap };
+  }),
+  toggleStickyScroll: () => set((s) => {
+    const stickyScroll = !s.stickyScroll;
+    try { localStorage.setItem("velvetsharp.stickyScroll", stickyScroll ? "1" : "0"); } catch { /* storage off */ }
+    saveConfigField("stickyScroll", stickyScroll);
+    return { stickyScroll };
+  }),
+  toggleRenderWhitespace: () => set((s) => {
+    const renderWhitespace = !s.renderWhitespace;
+    try { localStorage.setItem("velvetsharp.renderWhitespace", renderWhitespace ? "1" : "0"); } catch { /* storage off */ }
+    saveConfigField("renderWhitespace", renderWhitespace);
+    return { renderWhitespace };
+  }),
+  toggleTrimTrailing: () => set((s) => {
+    const trimTrailingOnSave = !s.trimTrailingOnSave;
+    try { localStorage.setItem("velvetsharp.trimTrailing", trimTrailingOnSave ? "1" : "0"); } catch { /* storage off */ }
+    saveConfigField("trimTrailing", trimTrailingOnSave);
+    return { trimTrailingOnSave };
+  }),
+  // Phase 17 — drag-reorder: move `fromPath` so it lands at the index where
+  // `toIndex` currently sits (tabs keep their other order)
+  moveTab: (fromPath, toIndex) => set((s) => {
+    const from = s.tabs.findIndex((t) => t.path === fromPath);
+    if (from < 0 || toIndex < 0 || toIndex >= s.tabs.length || from === toIndex) return {};
+    const tabs = [...s.tabs];
+    const [moved] = tabs.splice(from, 1);
+    tabs.splice(toIndex, 0, moved);
+    return { tabs };
+  }),
 
   setFiles: (files) => set({ files }),
   openFile: (path, content) => set((s) => {

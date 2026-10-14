@@ -181,6 +181,23 @@ check("MCP: apply_payload tool schema in stdio server", fs.readFileSync(path.joi
 check("MCP: README documents the Agent Bridge", fs.readFileSync(path.join(ROOT, "mcp", "README.md"), "utf8").includes("Agent Bridge"));
 check("theme chip lives in the titlebar now (moved up from the bottom bar)", js.includes("Color theme — click to change") && !/◐ theme/.test(js));
 
+// 4n. Phase 17 — UI overhaul + QOL batch
+check("activity rail with badges (replaces the sidebar tab-row)", /activity-rail/.test(js) && /rail-btn/.test(js) && /rail-badge/.test(js));
+check("titlebar command center opens the file palette", js.includes("Search files, symbols & commands") && /command-center/.test(js));
+check("breadcrumbs with caret-following symbol chip", /breadcrumbs/.test(js) && /crumb-sym/.test(js) && js.includes("reveal ") && js.includes("in the explorer"));
+check("tabs: drag-reorder + middle-click close + context menu", js.includes("text/vs-tab") && /onAuxClick/.test(js) && js.includes("Close Saved") && js.includes("Copy Full Path"));
+check("session restore: open tabs persist per workspace", js.includes("session restored — ") && js.includes("reopened"));
+check("Ctrl+Tab cycles tabs / Ctrl+B sidebar / Ctrl+J problems / Ctrl+Alt+S save-all", js.includes("View: Toggle Sidebar (Ctrl+B)") && js.includes("View: Toggle Problems Bar (Ctrl+J)") && js.includes("File: Save All (Ctrl+Alt+S)") && js.includes("nothing to save — every open script is clean"));
+check("F8 / Shift+F8 next/previous problem", js.includes("Go to Next Problem (F8)") && js.includes("Go to Previous Problem (Shift+F8)") && js.includes("no problems anywhere — nice"));
+check("welcome cards + recent projects", /welcome-card/.test(js) && /welcome-recents/.test(js));
+check("explorer filter box", /explorer-filter/.test(js) && js.includes("filter files…"));
+check("editor prefs: minimap / sticky scroll / whitespace toggles", js.includes("View: Toggle Minimap") && js.includes("View: Toggle Sticky Scroll") && js.includes("View: Toggle Whitespace Visibility"));
+check("sort usings command (System first, dupes removed)", js.includes("Edit: Sort Usings") && js.includes("usings sorted (System first, then the rest, dupes removed)") && js.includes("sort usings: nothing to change"));
+check("trim trailing whitespace on save", js.includes("File: Trim Trailing Whitespace on Save") && js.includes("velvetsharp.trimTrailing"));
+check("status bar: selection info + status flash", js.includes("sel-info") && js.includes("status-msg") && js.includes("· sel "));
+check("sidebar drag-resize handle", /sidebar-handle/.test(js) && js.includes("drag to resize the sidebar"));
+check("window title mirrors the active document", /document\.title/.test(js) && js.includes("setTitle"));
+
 // 5. no stale references to removed APIs
 check("no defineVelvetTheme remnant (theme system replaced it)", !js.includes("defineVelvetTheme"));
 

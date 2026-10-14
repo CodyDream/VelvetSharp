@@ -29,7 +29,23 @@
  *  graph errors · Phase 14 = real find-in-files + MCP for AI agents ·
  *  Phase 15 = full C# + Unity preprocessor support (all 13 directives + the
  *  whole define world autocompletes with sources) ·
- *  Phase 16 = this build (AGENT BRIDGE — LLM managing buttons move UP into
+ *  Phase 17 = this build (UI OVERHAUL + QOL BATCH — the whole shell is
+ *  refreshed: a VS Code-style activity rail replaces the cramped sidebar
+ *  tab-row (Explorer/Search/Outline/Problems/Graph/Agent with live error
+ *  badge, Settings pinned at the bottom, click-active-icon-to-collapse),
+ *  the titlebar gains a command-center search pill, tabs get file icons +
+ *  drag-reorder + middle-click close + a right-click menu (Close Others /
+ *  Close Saved / Copy Path), a breadcrumbs bar (path segments reveal the
+ *  explorer, the caret-following symbol chip opens a jump menu), the
+ *  welcome screen becomes a shortcut-card dashboard with recent projects,
+ *  and the status bar adds selection info + a flash on status changes.
+ *  QOL: Ctrl+Tab/Shift+Tab tab cycling, Ctrl+B sidebar, Ctrl+J problems,
+ *  Ctrl+, settings, Ctrl+N new script, Ctrl+Alt+S Save All, F8/Shift+F8
+ *  next/previous problem, minimap / sticky-scroll / whitespace prefs,
+ *  trim-trailing-whitespace-on-save, Sort Usings command, drag-resizable
+ *  sidebar, per-workspace session restore (open tabs + cursors survive a
+ *  restart) and the OS window title mirrors the active document.
+ *  (Phase 16 was: AGENT BRIDGE — LLM managing buttons move UP into
  *  the titlebar: `⧉ Structure → AI` opens the copy window where the user
  *  picks folders/sub-folders (tri-state checkboxes, presets, path filter,
  *  optional fenced file contents) and copies a paste-ready structure for
@@ -64,7 +80,7 @@
  *  file contents, discovered via <dataDir>/VelvetSharp/mcp.json).
  *  Every delivery bumps by one.
  */
-export const APP_PHASE = 16;
-export const APP_BUILD = "16.0.0";
+export const APP_PHASE = 17;
+export const APP_BUILD = "17.0.0";
 export const APP_LABEL = `Phase ${APP_PHASE}`;
 export const APP_TITLE = `VelvetSharp — ${APP_LABEL}`;

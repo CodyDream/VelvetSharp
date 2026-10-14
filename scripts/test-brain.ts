@@ -1994,6 +1994,136 @@ public class Battle13 : MonoBehaviour
     if (failed16.length) process.exitCode = 2;
   }
 
+  // ---- TEST62: Phase 17 — UI overhaul + QOL pure helpers ----
+  {
+    const results17: [string, boolean][] = [];
+    const check17 = (name: string, ok: boolean) => {
+      results17.push([name, !!ok]);
+      console.log(`  ${ok ? "PASS" : "FAIL"} — ${name}`);
+    };
+    const qol = await import("../app/src/qol");
+
+    // -- (a) sortUsings: sorts System first, then the rest, case-insensitive --
+    const messy = [
+      "using UnityEngine;",
+      "using System.Collections.Generic;",
+      "using UnityEditor;",                  // non-System group
+      "using System;",
+      "",
+      "public class Foo { }",
+    ].join("\n");
+    const sorted17 = qol.sortUsings(messy);
+    const sortedLines17 = (sorted17 ?? "").split(/\r?\n/).filter((l: string) => l.startsWith("using")).map((l: string) => l.trim());
+    check17("TEST62a sortUsings orders the System group first, then the rest alphabetically",
+      JSON.stringify(sortedLines17) === JSON.stringify([
+        "using System;",
+        "using System.Collections.Generic;",
+        "using UnityEditor;",
+        "using UnityEngine;",
+      ]));
+
+    // -- (b) already-sorted content returns null (no write) --
+    const clean17 = "using System;\nusing UnityEngine;\n\nclass B { }";
+    check17("TEST62b sortUsings returns null when the block is already sorted", qol.sortUsings(clean17) === null);
+
+    // -- (c) duplicates are removed and the gap collapses --
+    const duped = "using UnityEngine;\nusing System;\nusing UnityEngine;\n\nclass C { }";
+    const dedup17 = qol.sortUsings(duped) ?? "";
+    check17("TEST62c duplicate usings are removed",
+      (dedup17.match(/using UnityEngine;/g) ?? []).length === 1
+      && dedup17.includes("using System;")
+      && !dedup17.includes("\n\n\n"));
+
+    // -- (d) usingsSorted detects an unsorted block --
+    check17("TEST62d usingsSorted false for messy / true for sorted block",
+      !qol.usingsSorted(messy.split("\n")) && qol.usingsSorted(clean17.split("\n")));
+
+    // -- (e) files without usings / with code-first layout are untouched --
+    const noUsing17 = "public class NoUsings { }";
+    check17("TEST62e sortUsings returns null when there is no using block", qol.sortUsings(noUsing17) === null);
+
+    // -- (f) trimTrailingWhitespace: strips spaces/tabs, preserves CRLF, null when clean --
+    const dirty17 = "class A {\r\n    int x;   \r\n\t\r\n}";
+    const trimmed17 = qol.trimTrailingWhitespace(dirty17) ?? "";
+    check17("TEST62f trimTrailingWhitespace strips trailing ws and keeps CRLF",
+      trimmed17 === "class A {\r\n    int x;\r\n\r\n}"
+      && qol.trimTrailingWhitespace("class A {\n    int x;\n}\n") === null);
+
+    // -- (g) breadcrumbSegments splits a workspace path --
+    check17("TEST62g breadcrumbSegments splits + filters empty segments",
+      JSON.stringify(qol.breadcrumbSegments("Assets/Scripts/Player/PlayerController.cs")) ===
+      JSON.stringify(["Assets", "Scripts", "Player", "PlayerController.cs"]));
+
+    // -- (h) owningSymbol picks the innermost symbol at/above the caret line --
+    const outline17 = [
+      { name: "PlayerController", kind: "class", line: 2, depth: 0 },
+      { name: "Update", kind: "method", line: 8, depth: 1 },
+      { name: "LateUpdate", kind: "method", line: 20, depth: 1 },
+    ];
+    check17("TEST62h owningSymbol follows the caret (class before first member, latest member after)",
+      qol.owningSymbol(outline17, 5)?.name === "PlayerController"
+      && qol.owningSymbol(outline17, 9)?.name === "Update"
+      && qol.owningSymbol(outline17, 30)?.name === "LateUpdate"
+      && qol.owningSymbol(outline17, 0) === null);
+
+    // -- (i) session serialize + revive round-trip with vanished files dropped --
+    const tabs17 = [
+      { path: "Assets/Scripts/A.cs", cursor: { line: 3, col: 7 } },
+      { path: "Assets/Scripts/B.cs" },
+      { path: "Assets/Scripts/Gone.cs" },
+    ];
+    const sess17 = qol.serializeSession(tabs17, "Assets/Scripts/B.cs");
+    const revived17 = qol.reviveSession(sess17, ["Assets/Scripts/A.cs", "Assets/Scripts/B.cs"]);
+    check17("TEST62i serializeSession caps shape; reviveSession drops vanished files and keeps active",
+      sess17.version === 1 && sess17.tabs.length === 3
+      && revived17.tabs.length === 2
+      && revived17.active === "Assets/Scripts/B.cs"
+      && revived17.tabs[0].cursor?.line === 3);
+
+    // -- (j) reviveSession falls back to the last tab when the active file vanished --
+    const sess17b = qol.serializeSession(tabs17, "Assets/Scripts/Gone.cs");
+    const revived17b = qol.reviveSession(sess17b, ["Assets/Scripts/A.cs", "Assets/Scripts/B.cs"]);
+    check17("TEST62j reviveSession falls back to the last surviving tab when active vanished",
+      revived17b.active === "Assets/Scripts/B.cs");
+
+    // -- (k) reviveSession rejects unknown/malformed sessions --
+    check17("TEST62k reviveSession returns empty for null/garbage session",
+      qol.reviveSession(null, ["A.cs"]).tabs.length === 0
+      && qol.reviveSession({ version: 99, tabs: [], active: null } as any, ["A.cs"]).tabs.length === 0);
+
+    // -- (l) cycleTabIndex wraps both directions and handles single/empty --
+    check17("TEST62l cycleTabIndex wraps forward/back and guards empty lists",
+      qol.cycleTabIndex(3, 0, false) === 1
+      && qol.cycleTabIndex(3, 2, false) === 0
+      && qol.cycleTabIndex(3, 0, true) === 2
+      && qol.cycleTabIndex(1, 0, false) === 0
+      && qol.cycleTabIndex(0, 0, false) === -1);
+
+    // -- (m) nextProblemIndex walks the list and wraps --
+    const probs17 = [
+      { path: "A.cs", line: 1, col: 0 },
+      { path: "A.cs", line: 5, col: 2 },
+      { path: "B.cs", line: 0, col: 0 },
+    ];
+    check17("TEST62m nextProblemIndex steps from the current problem and wraps both ways",
+      qol.nextProblemIndex(probs17, null, false) === 0
+      && qol.nextProblemIndex(probs17, probs17[0], false) === 1
+      && qol.nextProblemIndex(probs17, probs17[2], false) === 0
+      && qol.nextProblemIndex(probs17, probs17[0], true) === 2
+      && qol.nextProblemIndex(probs17, probs17[2], true) === 1);
+
+    // -- (n) trailing-whitespace trim never touches leading indentation --
+    const indent17 = "class X {\n\tvoid M() {\n\t\treturn;  \n\t}\n}";
+    const trimmedIndent17 = qol.trimTrailingWhitespace(indent17) ?? "";
+    check17("TEST62n trim keeps indentation, strips only the tail",
+      trimmedIndent17 === "class X {\n\tvoid M() {\n\t\treturn;\n\t}\n}");
+
+    const failed17 = results17.filter(([, ok]) => !ok);
+    console.log(`\n=========== Phase 17 RESULT: ${results17.length - failed17.length}/${results17.length} PASS ===========`);
+    for (const [name] of failed17) console.log("  FAILED:", name);
+    if (failed17.length) process.exitCode = 2;
+  }
+
   // ---- Phase 9 summary ----
   const failed8 = results8.filter(([, ok]) => !ok);
   console.log(`\n=========== Phase 8 RESULT: ${results8.length - failed8.length}/${results8.length} PASS ===========`);

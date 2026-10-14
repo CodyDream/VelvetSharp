@@ -1013,3 +1013,191 @@ button.asm-chip { font: inherit; }
   font-size: 11.5px; line-height: 1.5; padding: 8px 10px; max-height: 160px; overflow: auto;
   white-space: pre-wrap;
 }
+
+/* ====================================================================
+   Phase 17 — UI overhaul + QOL batch
+   (activity rail, command-center titlebar, modern tabs, breadcrumbs,
+   status-bar segments, welcome cards, explorer filter, sidebar handle)
+   ==================================================================== */
+
+/* ---------- activity rail (replaces the old sidebar-tabs row) ---------- */
+.activity-rail {
+  width: 44px; min-width: 44px;
+  background: var(--bg-deepest);
+  border-right: 1px solid var(--border);
+  display: flex; flex-direction: column;
+  padding: 6px 0 8px;
+  user-select: none;
+}
+.rail-group { display: flex; flex-direction: column; gap: 2px; align-items: center; }
+.rail-bottom { margin-top: auto; }
+.rail-btn {
+  position: relative;
+  width: 36px; height: 36px;
+  display: grid; place-items: center;
+  background: none; border: none;
+  color: var(--muted); font-size: 17px;
+  cursor: pointer; border-radius: 8px;
+  transition: background .12s, color .12s;
+}
+.rail-btn:hover { background: var(--bg-raised); color: var(--text); }
+.rail-btn.active { color: var(--accent); background: var(--accent-soft); }
+.rail-btn.active::before {
+  content: ""; position: absolute; left: -4px; top: 7px; bottom: 7px; width: 3px;
+  border-radius: 2px; background: var(--accent);
+}
+.rail-glyph { line-height: 1; }
+.rail-badge {
+  position: absolute; top: 2px; right: 1px;
+  min-width: 14px; height: 14px; padding: 0 3px;
+  border-radius: 7px; font-size: 9px; font-weight: 700; line-height: 14px;
+  text-align: center; color: #fff;
+}
+.rail-badge.err { background: var(--err); }
+.rail-badge.warn { background: var(--warn); color: #201a08; }
+
+/* ---------- titlebar: logo mark + command center ---------- */
+.logo-mark {
+  display: grid; place-items: center;
+  width: 20px; height: 20px; border-radius: 6px;
+  background: linear-gradient(135deg, var(--grad-a), var(--grad-b));
+  color: #fff; font-size: 11px;
+  box-shadow: 0 0 12px var(--accent-soft);
+}
+.command-center {
+  margin-left: 18px;
+  display: flex; align-items: center; gap: 8px;
+  width: min(360px, 34vw); height: 24px;
+  padding: 0 8px 0 10px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border); border-radius: 6px;
+  color: var(--hint-text); font: inherit; font-size: 11.5px;
+  cursor: pointer; text-align: left;
+  transition: border-color .12s, color .12s, background .12s;
+}
+.command-center:hover { border-color: var(--accent); color: var(--text); background: var(--bg-raised); }
+.cc-glyph { font-size: 13px; color: var(--muted); }
+.cc-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cc-key {
+  font-size: 9.5px; color: var(--hint-text);
+  border: 1px solid var(--border); border-radius: 3px; padding: 0 4px;
+  background: var(--bg-panel);
+}
+
+/* ---------- tabs: icons, dirty dot, drag feedback ---------- */
+.tab { position: relative; user-select: none; }
+.tab-icon {
+  font-size: 8.5px; font-weight: 800; letter-spacing: .2px;
+  width: 17px; height: 15px; flex: none;
+  display: inline-grid; place-items: center;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+}
+.tab-icon.meta, .tab-icon.txt { background: transparent; color: var(--hint-text); font-weight: 700; }
+.tab-icon.scene { background: color-mix(in srgb, #4ec9b0 18%, transparent); color: #4ec9b0; }
+.tab.active .tab-icon { background: var(--accent); color: #fff; }
+.tab-dirty { margin-left: 2px; }
+.tab .tab-close { margin-left: 2px; }
+.tab.drag-over { box-shadow: inset 2px 0 0 var(--accent2); }
+
+/* ---------- breadcrumbs ---------- */
+.breadcrumbs {
+  display: flex; align-items: center; gap: 2px;
+  height: 26px; padding: 0 12px;
+  background: var(--bg-editor);
+  border-bottom: 1px solid var(--border);
+  font-size: 11.5px; color: var(--muted);
+  overflow: hidden; white-space: nowrap; flex: none;
+}
+.crumb-wrap { display: inline-flex; align-items: center; position: relative; }
+.crumb { padding: 2px 5px; border-radius: 4px; cursor: pointer; color: var(--muted); }
+.crumb:hover { background: var(--bg-raised); color: var(--text); }
+.crumb-file { color: var(--text); font-weight: 600; cursor: default; }
+.crumb-file:hover { background: none; }
+.crumb-sym { color: var(--accent); font-weight: 600; }
+.crumb-sym .k { margin-right: 3px; font-size: 10px; }
+.crumb-sep { color: var(--faint-text); margin: 0 1px; }
+.crumb-sym-menu {
+  position: absolute; left: 0; top: 24px; z-index: 80;
+  min-width: 260px; max-height: 300px; overflow: auto;
+  background: var(--widget-bg); border: 1px solid var(--widget-border);
+  border-radius: 8px; padding: 4px;
+  box-shadow: 0 12px 34px rgba(0,0,0,.55);
+}
+.crumb-sym-menu .outline-item { padding: 3px 8px; border-radius: 4px; }
+
+/* ---------- status bar polish ---------- */
+.sel-info { color: var(--accent-hover-text); }
+.status-msg {
+  color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  animation: statusFlash .9s ease-out 1;
+}
+@keyframes statusFlash {
+  0% { color: var(--accent-hover-text); text-shadow: 0 0 10px var(--accent-soft); }
+  100% { color: var(--muted); text-shadow: none; }
+}
+
+/* ---------- welcome v2 ---------- */
+.welcome-v2 { max-width: 720px; padding: 0 20px; }
+.welcome-tag { font-size: 13px; margin-top: -2px; }
+.welcome-recents {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: center;
+  margin: 4px 0 14px;
+}
+.welcome-recents-label { color: var(--faint-text); font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
+.welcome-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 10px; margin-top: 18px; width: 100%;
+}
+.welcome-card {
+  background: color-mix(in srgb, var(--bg-panel) 82%, transparent);
+  border: 1px solid var(--border); border-radius: 12px;
+  padding: 12px 16px; text-align: left;
+  transition: border-color .15s, transform .15s;
+}
+.welcome-card:hover { border-color: var(--accent); transform: translateY(-1px); }
+.wc-title { color: var(--text); font-weight: 600; font-size: 12.5px; margin-bottom: 6px; letter-spacing: .3px; }
+.welcome-card ul { margin: 0; padding: 0; list-style: none; line-height: 1.75; font-size: 12px; }
+
+/* ---------- explorer filter + flat results + colored file glyphs ---------- */
+.explorer-head { position: sticky; top: 0; z-index: 2; background: var(--bg-panel); padding-bottom: 2px; }
+.explorer-filter {
+  width: calc(100% - 20px); margin: 0 10px 6px;
+  background: var(--bg-inset); border: 1px solid var(--border);
+  border-radius: 6px; color: var(--text);
+  padding: 4px 9px; font: inherit; font-size: 11.5px; outline: none;
+}
+.explorer-filter:focus { border-color: var(--accent); }
+.explorer-filter::placeholder { color: var(--hint-text); }
+.explorer-flat { display: flex; flex-direction: column; }
+.file-flat-name { overflow: hidden; text-overflow: ellipsis; }
+.file .file-icon.cs {
+  font-size: 8px; font-weight: 800; letter-spacing: .2px;
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--accent); border-radius: 4px; padding: 1px 3px;
+}
+.file .file-icon.scene { color: #4ec9b0; font-size: 8px; font-weight: 800; padding: 1px 3px; }
+.file .file-icon.meta, .file .file-icon.txt { color: var(--hint-text); font-size: 8px; font-weight: 700; }
+
+/* ---------- sidebar drag handle ---------- */
+.sidebar-handle {
+  width: 4px; min-width: 4px; cursor: col-resize;
+  background: transparent; position: relative; z-index: 5;
+  transition: background .15s;
+}
+.sidebar-handle:hover, body.resizing .sidebar-handle { background: var(--accent); opacity: .55; }
+body.resizing { cursor: col-resize; user-select: none; }
+
+/* ---------- modal entrance animation (subtle, theme-agnostic) ---------- */
+.overlay { animation: overlayIn .12s ease-out; }
+@keyframes overlayIn { from { opacity: 0; } to { opacity: 1; } }
+.modal { animation: modalIn .14s ease-out; }
+@keyframes modalIn {
+  from { opacity: 0; transform: translateY(6px) scale(.985); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ---------- problems rows keep their mono file column tidy ---------- */
+.problem-row .pr-file { font-family: Consolas, 'Cascadia Mono', monospace; }

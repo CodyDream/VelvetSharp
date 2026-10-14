@@ -2,7 +2,7 @@
 
 **A lightweight, fast-opening Unity C# IDE — a portable alternative to Rider, Visual Studio and VS Code.**
 
-*Phase 14 · build 14.0.0 — the phase is always visible in the status bar; every release bumps it by one (see [VERSIONS.md](VERSIONS.md)).*
+*Phase 17 · build 17.0.0 — the phase is always visible in the status bar; every release bumps it by one (see [VERSIONS.md](VERSIONS.md)).*
 
 Zero .NET runtime. Zero OmniSharp. Zero Electron. The entire C# intelligence engine ("the brain") is custom-built in TypeScript, runs off the UI thread in **two Web Workers** (an interactive lane + an analysis lane), on tree-sitter (WASM) + a Unity API database extracted straight from `UnityEngine.dll` by our own ECMA-335 metadata reader. The desktop shell is Neutralino 6.x — the whole portable build opens a Unity project in seconds.
 
@@ -32,6 +32,14 @@ Unity scripts are small, but the IDEs people use for them are not. VelvetSharp s
 
 ![Preprocessor completions](docs/screenshots/preproc-completion.png)
 ![Agent Bridge — structure window](docs/screenshots/agent-bridge-structure.png)
+![Phase 17 shell — activity rail, command center, tabs, breadcrumbs](docs/screenshots/phase17-editor.png)
+![Phase 17 welcome dashboard](docs/screenshots/phase17-welcome.png)
+
+### The 2025 shell (Phase 17 — UI overhaul + QOL batch)
+- **Activity rail** — a VS Code-style icon bar on the left edge (Explorer / Search / Outline / Problems **with a live error badge** / Graph / Agent Bridge, Settings pinned at the bottom); clicking the active icon collapses the panel, `Ctrl+B` hides the whole sidebar, and the sidebar itself is **drag-resizable** (persisted)
+- **Command center** — the titlebar's search pill opens quick-open (`Ctrl+P`); tabs gained **file icons, drag-to-reorder, middle-click close** and a right-click menu (Close / Close Others / Close Saved / Close All / Copy Relative + Full Path); **breadcrumbs** under the tabs reveal folders in the explorer and follow your caret with a click-to-jump symbol menu
+- **QOL batch** — `Ctrl+Tab`/`Ctrl+Shift+Tab` cycle tabs, `Ctrl+J` problems, `Ctrl+,` settings, `Ctrl+N` new script, `Ctrl+Alt+S` **Save All**, `F8`/`Shift+F8` next/previous problem project-wide; **session restore** reopens your tabs (and cursors) per workspace after a restart; the OS **window title mirrors the active document** (• when dirty)
+- **Editor preferences that persist** — minimap, sticky scroll, whitespace visibility, **trim trailing whitespace on save**, plus an **Edit: Sort Usings** command (System first, duplicates removed) — all in the palette and ⚙ Settings; the welcome screen is now a shortcut-card dashboard with your **recent projects**, and the status bar shows selection size with a flash on status changes
 
 ### Graphs
 - **⬡ Dependency graph** — project types only (classes / structs / interfaces / enums), 4 layouts (hierarchical, organic, circular, business), folder scoping, optional Unity/BCL externals, static-singleton badges with self-loops
@@ -111,7 +119,7 @@ scripts/              tests, probes, verify markers, E2E harnesses
 ## Testing
 
 ```bash
-npm test          # engine suite (205 assertions across 13 suites) + dist markers (93)
+npm test          # engine suite + dist markers
 npm run test:brain
 ```
 
@@ -135,6 +143,7 @@ The engine suite covers parsing, symbol extraction, type inference, completions,
 | **14** | **14.0.0** | **real find-in-files (Ctrl+Shift+F: live search, case/whole-word/regex, match highlighting, honest “not scanned yet → scan & re-run” coverage) + MCP server so AI agents can pull problems / structure / code search / file contents from the running editor** |
 | **15** | **15.0.0** | **full C# + Unity preprocessor — all 13 directives + the whole define world (Unity built-ins, version chain, csproj/scripting/rsp/code defines) autocomplete with sources, hover explains symbols, did-you-mean + CS1032** |
 | **16** | **16.0.0** | **Agent Bridge — titlebar LLM buttons: copy the project structure (pick folders/sub-folders, optional code contents) to any web AI, paste its JSON payload back to auto create/modify/delete/move scripts with a copyable report; MCP gains apply_payload write access** |
+| **17** | **17.0.0** | **UI overhaul + QOL batch — activity rail, command center, modern tabs (icons / drag-reorder / context menu), breadcrumbs, welcome cards + recents, sidebar resize; Ctrl+Tab cycling, F8 problem walk, Save All, session restore, Sort Usings, trim-on-save, minimap/sticky/whitespace prefs** |
 
 Full details in [VERSIONS.md](VERSIONS.md).
 
